@@ -26,7 +26,7 @@ This is fundamentally different from a traditional Lambda where you respond to e
 ## Reading
 
 1. **Cloudflare**: [How Cloudflare Works](https://developers.cloudflare.com/fundamentals/get-started/concepts/how-cloudflare-works/) (~5 min)
-2. **External**: [A Brief History of Edge Computing](https://www.cloudflare.com/learning/cloud/what-is-edge-computing/) — understand why this matters beyond hype (~5 min)
+2. **Cloudflare Learning**: [What is Edge Computing?](https://www.cloudflare.com/learning/serverless/what-is-edge-computing/) — understand why this matters beyond hype (~5 min)
 
 ## Bridge to Next Day
 

@@ -14,6 +14,44 @@ import { isFeatureFlagEnabled, isFeatureFlagSimple } from './featureFlags';
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
+		const url = new URL(request.url);
+
+		// Cache GET /api/products using Cloudflare Cache API with surrogate keys
+		if (url.pathname === '/api/products' && request.method === 'GET') {
+			const cacheKey = new Request(url.toString(), { method: 'GET' });
+			const cache = caches.default;
+
+			let response = await cache.match(cacheKey);
+			if (response) {
+				// Optionally add a header to indicate cache hit
+				response.headers.set('X-Cache', 'HIT');
+				return response;
+			}
+
+			// Cache miss: fetch from origin
+			const originResponse = await fetch(`https://api.example.com${url.pathname}`);
+			if (!originResponse.ok) {
+				// If origin fails, return error without caching
+				return originResponse;
+			}
+
+			const body = await originResponse.json();
+
+			response = new Response(JSON.stringify(body), {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/json',
+					'Cache-Control': 'public, max-age=300, s-maxage=3600',
+					'Cache-Tag': 'products,api' // surrogate key for purging
+				}
+			});
+
+			// Store a clone in the cache (response is a ReadableStream, cloning lets us return one and cache another)
+			await cache.put(cacheKey, response.clone());
+			response.headers.set('X-Cache', 'MISS');
+			return response;
+		}
+
 		// Example 1: Simple boolean flag to enable/disable a new feature
 		const useNewRouting = await isFeatureFlagSimple(
 			env.FEATURE_FLAGS,
@@ -64,11 +102,11 @@ export default {
 			originUrl = isMobile ? 'https://mobile.example.com' : 'https://www.example.com';
 		}
 
-		const url = new URL(request.url);
-		url.host = originUrl.split('//')[1];
+		const urlObj = new URL(request.url);
+		urlObj.host = originUrl.split('//')[1];
 
 		// 4. Create new request with custom headers
-		const newRequest = new Request(url, request);
+		const newRequest = new Request(urlObj, request);
 		newRequest.headers.set('X-Forwarded-By', 'edge-worker');
 		newRequest.headers.set('X-Is-Mobile', isMobile ? 'true' : 'false');
 		newRequest.headers.set('X-Edge-Location', colo); // Add custom header with colo

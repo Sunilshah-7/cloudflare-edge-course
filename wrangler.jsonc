@@ -42,5 +42,26 @@
 	 * Service Bindings (communicate between multiple Workers)
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
 	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ],
+	/**
+	 * Feature Flags KV Namespace
+	 * Stores feature flag configurations with origin fallback and caching
+	 */
+	"kv_namespaces": [
+		{
+			"binding": "FEATURE_FLAGS",
+			"id": "FEATURE_FLAGS_NAMESPACE_PLACEHOLDER"
+		}
+	]
 }
+
+	/**
+	 * Feature Flags KV Namespace
+	 * Stores feature flag configurations with origin fallback and caching
+	 */
+	"kv_namespaces": [
+		{
+			"binding": "FEATURE_FLAGS",
+			"id": "FEATURE_FLAGS_NAMESPACE_PLACEholder"
+		}
+	]

@@ -196,22 +196,57 @@ function isDebugEnabled(debug: Env['DEBUG']): boolean {
 	return debug === true || debug === 'true';
 }
 
-async function fetchConfiguredAPI(request: Request, env: Env): Promise<Response> {
+function appendPath(url: string, path: string): string {
+	return `${url.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+}
+
+async function readUpstreamBody(response: Response): Promise<unknown> {
+	const contentType = response.headers.get('Content-Type') || '';
+	if (contentType.includes('application/json')) {
+		return response.json();
+	}
+
+	return response.text();
+}
+
+async function fetchConfiguredAPIs(request: Request, env: Env): Promise<Response> {
 	const { API_KEY: apiKey, API_ENDPOINT: endpoint } = env;
 
 	if (!apiKey || !endpoint) {
 		return new Response('API configuration missing', { status: 500 });
 	}
 
+	const urls = [endpoint, appendPath(endpoint, 'posts'), appendPath(endpoint, 'comments')];
+
 	if (isDebugEnabled(env.DEBUG)) {
-		console.log(`Calling ${endpoint}`);
+		console.log(`Calling ${urls.join(', ')}`);
 	}
 
 	const headers = new Headers(request.headers);
 	headers.set('Authorization', `Bearer ${apiKey}`);
 
-	return fetch(endpoint, {
-		headers,
+	const [user, posts, comments] = await Promise.all(
+		urls.map((url) =>
+			fetch(url, {
+				headers,
+			})
+		)
+	);
+
+	if (!user.ok || !posts.ok || !comments.ok) {
+		return new Response('Upstream request failed', { status: 502 });
+	}
+
+	const [userBody, postsBody, commentsBody] = await Promise.all([
+		readUpstreamBody(user),
+		readUpstreamBody(posts),
+		readUpstreamBody(comments),
+	]);
+
+	return Response.json({
+		user: userBody,
+		posts: postsBody,
+		comments: commentsBody,
 	});
 }
 
@@ -237,7 +272,7 @@ export async function handler(
 	}
 
 	// Proceed with request
-	return fetchConfiguredAPI(currentRequest, env);
+	return fetchConfiguredAPIs(currentRequest, env);
 }
 
 export default {

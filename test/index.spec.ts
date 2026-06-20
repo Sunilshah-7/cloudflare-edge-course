@@ -80,7 +80,7 @@ describe('JWT auth middleware', () => {
 		expect(await response.text()).toBe('Unauthorized');
 	});
 
-	it('verifies a JWT and calls the configured API with secret auth and user headers', async () => {
+	it('verifies a JWT and calls configured APIs in parallel with secret auth and user headers', async () => {
 		const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 		const kid = crypto.randomUUID();
 		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
@@ -90,6 +90,14 @@ describe('JWT auth middleware', () => {
 			scope: 'read:profile write:profile',
 			exp: Math.floor(Date.now() / 1000) + 300,
 		});
+		const apiRequests: Array<{
+			url: string;
+			authorization: string | null;
+			userId: string | null;
+			scope: string | null;
+		}> = [];
+		let activeAPIFetches = 0;
+		let maxActiveAPIFetches = 0;
 
 		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
 			const request = input instanceof Request ? input : new Request(input, init);
@@ -103,13 +111,19 @@ describe('JWT auth middleware', () => {
 				});
 			}
 
+			activeAPIFetches++;
+			maxActiveAPIFetches = Math.max(maxActiveAPIFetches, activeAPIFetches);
+			apiRequests.push({
+				url: request.url,
+				authorization: request.headers.get('Authorization'),
+				userId: request.headers.get('X-User-ID'),
+				scope: request.headers.get('X-User-Scope'),
+			});
+			await Promise.resolve();
+			activeAPIFetches--;
+
 			return new Response(
-				JSON.stringify({
-					url: request.url,
-					authorization: request.headers.get('Authorization'),
-					userId: request.headers.get('X-User-ID'),
-					scope: request.headers.get('X-User-Scope'),
-				}),
+				JSON.stringify({ resource: request.url.split('/').at(-1), url: request.url }),
 				{ headers: { 'Content-Type': 'application/json' } }
 			);
 		});
@@ -130,12 +144,34 @@ describe('JWT auth middleware', () => {
 		await waitOnExecutionContext(ctx);
 		expect(response.status).toBe(200);
 		await expect(response.json()).resolves.toEqual({
-			url: 'https://api.example.test/profile',
-			authorization: 'Bearer upstream-secret',
-			userId: 'user_123',
-			scope: 'read:profile write:profile',
+			user: { resource: 'profile', url: 'https://api.example.test/profile' },
+			posts: { resource: 'posts', url: 'https://api.example.test/profile/posts' },
+			comments: { resource: 'comments', url: 'https://api.example.test/profile/comments' },
 		});
-		expect(log).toHaveBeenCalledWith('Calling https://api.example.test/profile');
+		expect(apiRequests).toEqual([
+			{
+				url: 'https://api.example.test/profile',
+				authorization: 'Bearer upstream-secret',
+				userId: 'user_123',
+				scope: 'read:profile write:profile',
+			},
+			{
+				url: 'https://api.example.test/profile/posts',
+				authorization: 'Bearer upstream-secret',
+				userId: 'user_123',
+				scope: 'read:profile write:profile',
+			},
+			{
+				url: 'https://api.example.test/profile/comments',
+				authorization: 'Bearer upstream-secret',
+				userId: 'user_123',
+				scope: 'read:profile write:profile',
+			},
+		]);
+		expect(maxActiveAPIFetches).toBe(3);
+		expect(log).toHaveBeenCalledWith(
+			'Calling https://api.example.test/profile, https://api.example.test/profile/posts, https://api.example.test/profile/comments'
+		);
 	});
 
 	it('returns 401 when the JWT signature is invalid', async () => {

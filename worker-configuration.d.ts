@@ -12,6 +12,7 @@ declare global {
 		API_KEY: string;
 		API_ENDPOINT: string;
 		DEBUG: boolean | string;
+		ANALYTICS_ENGINE?: AnalyticsEngineDataset;
 		FEATURE_FLAGS: KVNamespace;
 		RATE_LIMIT: KVNamespace;
 		COUNTER: DurableObjectNamespace<Counter>;

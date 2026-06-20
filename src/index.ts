@@ -22,6 +22,7 @@ const ORIGIN_TIMEOUT_MS = 5000;
 const RATE_LIMIT_DEFAULT_LIMIT = 100;
 const RATE_LIMIT_DEFAULT_WINDOW_SECONDS = 60;
 const USER_STATE_SHARD_COUNT = 100;
+const UNKNOWN_COUNTRY = 'unknown';
 
 interface JWKWithKid extends JsonWebKey {
 	kid?: string;
@@ -221,6 +222,20 @@ function parseFiniteNumber(value: string | null): number | null {
 function getShardId(value: string, numShards: number): number {
 	const hash = Array.from(value).reduce((acc, char) => acc + char.charCodeAt(0), 0);
 	return hash % numShards;
+}
+
+function writeApiLatency(request: Request, env: Env, status: number, durationMs: number): void {
+	if (!env.ANALYTICS_ENGINE) {
+		return;
+	}
+
+	const url = new URL(request.url);
+	const country = typeof request.cf?.country === 'string' ? request.cf.country : UNKNOWN_COUNTRY;
+	env.ANALYTICS_ENGINE.writeDataPoint({
+		indexes: [url.pathname],
+		doubles: [durationMs, status],
+		blobs: [url.pathname, country, request.method],
+	});
 }
 
 function isDebugEnabled(debug: Env['DEBUG']): boolean {
@@ -548,7 +563,7 @@ async function handleUserStateRequest(request: Request, env: Env): Promise<Respo
 	return new Response('Not found', { status: 404 });
 }
 
-export async function handler(
+async function routeRequest(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext
@@ -596,6 +611,23 @@ export async function handler(
 
 	// Proceed with request
 	return fetchConfiguredAPIs(currentRequest, env, ctx);
+}
+
+export async function handler(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext
+): Promise<Response> {
+	const startTime = Date.now();
+
+	try {
+		const response = await routeRequest(request, env, ctx);
+		writeApiLatency(request, env, response.status, Date.now() - startTime);
+		return response;
+	} catch (error) {
+		writeApiLatency(request, env, 500, Date.now() - startTime);
+		throw error;
+	}
 }
 
 export default {

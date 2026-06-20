@@ -61,6 +61,19 @@ function createEnv(jwksUrl: string, overrides: Partial<Env> = {}): Env {
 	};
 }
 
+function createAnalyticsEngine() {
+	const points: AnalyticsEngineDataPoint[] = [];
+	const dataset: AnalyticsEngineDataset = {
+		writeDataPoint(point?: AnalyticsEngineDataPoint) {
+			if (point) {
+				points.push(point);
+			}
+		},
+	};
+
+	return { dataset, points };
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
@@ -78,6 +91,30 @@ describe('JWT auth middleware', () => {
 		await waitOnExecutionContext(ctx);
 		expect(response.status).toBe(401);
 		expect(await response.text()).toBe('Unauthorized');
+	});
+
+	it('writes API latency analytics for each endpoint response', async () => {
+		const { dataset, points } = createAnalyticsEngine();
+		const ctx = createExecutionContext();
+		const response = await handler(
+			new Request('https://app.example.com/api/profile', {
+				cf: { country: 'US' },
+			}),
+			createEnv('https://issuer.example.com/missing-token/jwks.json', {
+				ANALYTICS_ENGINE: dataset,
+			}),
+			ctx
+		);
+
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(401);
+		expect(points).toHaveLength(1);
+		expect(points[0]).toEqual({
+			indexes: ['/api/profile'],
+			doubles: [expect.any(Number), 401],
+			blobs: ['/api/profile', 'US', 'GET'],
+		});
+		expect(points[0].doubles?.[0]).toBeGreaterThanOrEqual(0);
 	});
 
 	it('verifies a JWT and calls configured APIs in parallel with secret auth and user headers', async () => {

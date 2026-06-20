@@ -19,6 +19,12 @@
 	"observability": {
 		"enabled": true
 	},
+	"analytics_engine_datasets": [
+		{
+			"binding": "ANALYTICS_ENGINE",
+			"dataset": "api_latency"
+		}
+	],
 	"upload_source_maps": true,
 	/**
 	 * Smart Placement
@@ -50,6 +56,12 @@
 				"API_ENDPOINT": "https://staging.example.com",
 				"DEBUG": true
 			},
+			"analytics_engine_datasets": [
+				{
+					"binding": "ANALYTICS_ENGINE",
+					"dataset": "api_latency_staging"
+				}
+			],
 			"durable_objects": {
 				"bindings": [
 					{
@@ -104,6 +116,12 @@
 				"API_ENDPOINT": "https://api.example.com",
 				"DEBUG": false
 			},
+			"analytics_engine_datasets": [
+				{
+					"binding": "ANALYTICS_ENGINE",
+					"dataset": "api_latency_production"
+				}
+			],
 			"durable_objects": {
 				"bindings": [
 					{

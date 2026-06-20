@@ -13,6 +13,8 @@
 
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
 
+const ORIGIN_TIMEOUT_MS = 5000;
+
 interface JWKWithKid extends JsonWebKey {
 	kid?: string;
 }
@@ -209,7 +211,68 @@ async function readUpstreamBody(response: Response): Promise<unknown> {
 	return response.text();
 }
 
-async function fetchConfiguredAPIs(request: Request, env: Env): Promise<Response> {
+function getCacheKey(upstreamUrl: string, request: Request): Request {
+	const cacheUrl = new URL('https://worker-cache.local/api-proxy');
+	cacheUrl.searchParams.set('url', upstreamUrl);
+	cacheUrl.searchParams.set('user', request.headers.get('X-User-ID') || 'anonymous');
+	cacheUrl.searchParams.set('scope', request.headers.get('X-User-Scope') || '');
+
+	return new Request(cacheUrl, { method: 'GET' });
+}
+
+async function fetchWithTimeout(url: string, headers: Headers): Promise<Response> {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort('Timeout'), ORIGIN_TIMEOUT_MS);
+
+	try {
+		return await fetch(url, {
+			headers,
+			signal: controller.signal,
+		});
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+async function fetchResilientAPI(
+	url: string,
+	request: Request,
+	headers: Headers,
+	ctx: ExecutionContext
+): Promise<Response> {
+	const cacheKey = getCacheKey(url, request);
+	const cache = caches.default;
+
+	const cached = await cache.match(cacheKey);
+	if (cached) {
+		return cached;
+	}
+
+	try {
+		const originResponse = await fetchWithTimeout(url, headers);
+
+		if (originResponse.ok) {
+			ctx.waitUntil(
+				cache.put(cacheKey, originResponse.clone()).catch((error) => {
+					console.warn('Cache put failed:', error);
+				})
+			);
+			return originResponse;
+		}
+
+		console.error(`Origin fetch failed: ${originResponse.status}`);
+	} catch (error) {
+		console.error('Origin fetch failed:', error);
+	}
+
+	return new Response('Service unavailable (origin down)', { status: 503 });
+}
+
+async function fetchConfiguredAPIs(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext
+): Promise<Response> {
 	const { API_KEY: apiKey, API_ENDPOINT: endpoint } = env;
 
 	if (!apiKey || !endpoint) {
@@ -226,15 +289,11 @@ async function fetchConfiguredAPIs(request: Request, env: Env): Promise<Response
 	headers.set('Authorization', `Bearer ${apiKey}`);
 
 	const [user, posts, comments] = await Promise.all(
-		urls.map((url) =>
-			fetch(url, {
-				headers,
-			})
-		)
+		urls.map((url) => fetchResilientAPI(url, request, headers, ctx))
 	);
 
 	if (!user.ok || !posts.ok || !comments.ok) {
-		return new Response('Upstream request failed', { status: 502 });
+		return new Response('Service unavailable (origin down)', { status: 503 });
 	}
 
 	const [userBody, postsBody, commentsBody] = await Promise.all([
@@ -272,7 +331,7 @@ export async function handler(
 	}
 
 	// Proceed with request
-	return fetchConfiguredAPIs(currentRequest, env);
+	return fetchConfiguredAPIs(currentRequest, env, ctx);
 }
 
 export default {

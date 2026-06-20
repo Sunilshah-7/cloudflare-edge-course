@@ -119,12 +119,17 @@ describe('JWT auth middleware', () => {
 				userId: request.headers.get('X-User-ID'),
 				scope: request.headers.get('X-User-Scope'),
 			});
-			await Promise.resolve();
+			await new Promise((resolve) => setTimeout(resolve, 1));
 			activeAPIFetches--;
 
 			return new Response(
 				JSON.stringify({ resource: request.url.split('/').at(-1), url: request.url }),
-				{ headers: { 'Content-Type': 'application/json' } }
+				{
+					headers: {
+						'Content-Type': 'application/json',
+						'Cache-Control': 'public, max-age=60',
+					},
+				}
 			);
 		});
 
@@ -210,5 +215,125 @@ describe('JWT auth middleware', () => {
 		await waitOnExecutionContext(ctx);
 		expect(response.status).toBe(401);
 		expect(await response.text()).toBe('Unauthorized');
+	});
+
+	it('serves cached API responses when the origin fails later', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const endpoint = `https://api.example.test/${kid}/profile`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: 'user_cache',
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+		let failAPI = false;
+		let apiFetches = 0;
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			apiFetches++;
+			if (failAPI) {
+				throw new Error('Origin unavailable');
+			}
+
+			return Response.json(
+				{
+					resource: request.url.split('/').at(-1),
+					from: 'origin',
+				},
+				{
+					headers: { 'Cache-Control': 'public, max-age=60' },
+				}
+			);
+		});
+
+		const request = new Request('https://app.example.com/api/profile', {
+			headers: { Authorization: `Bearer ${token}` },
+		});
+		const firstCtx = createExecutionContext();
+		const first = await handler(
+			request,
+			createEnv(jwksUrl, {
+				API_ENDPOINT: endpoint,
+			}),
+			firstCtx
+		);
+
+		await waitOnExecutionContext(firstCtx);
+		expect(first.status).toBe(200);
+		await expect(first.json()).resolves.toEqual({
+			user: { resource: 'profile', from: 'origin' },
+			posts: { resource: 'posts', from: 'origin' },
+			comments: { resource: 'comments', from: 'origin' },
+		});
+		expect(apiFetches).toBe(3);
+
+		failAPI = true;
+
+		const secondCtx = createExecutionContext();
+		const second = await handler(
+			request,
+			createEnv(jwksUrl, {
+				API_ENDPOINT: endpoint,
+			}),
+			secondCtx
+		);
+
+		await waitOnExecutionContext(secondCtx);
+		expect(second.status).toBe(200);
+		await expect(second.json()).resolves.toEqual({
+			user: { resource: 'profile', from: 'origin' },
+			posts: { resource: 'posts', from: 'origin' },
+			comments: { resource: 'comments', from: 'origin' },
+		});
+		expect(apiFetches).toBe(3);
+	});
+
+	it('returns 503 when the API origin fails and no cache entry exists', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: 'user_no_cache',
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			throw new Error('Origin unavailable');
+		});
+
+		const ctx = createExecutionContext();
+		const response = await handler(
+			new Request('https://app.example.com/api/profile', {
+				headers: { Authorization: `Bearer ${token}` },
+			}),
+			createEnv(jwksUrl, {
+				API_ENDPOINT: `https://api.example.test/${kid}/profile`,
+			}),
+			ctx
+		);
+
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(503);
+		expect(await response.text()).toBe('Service unavailable (origin down)');
 	});
 });

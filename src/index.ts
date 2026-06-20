@@ -24,6 +24,12 @@ const RATE_LIMIT_DEFAULT_WINDOW_SECONDS = 60;
 const USER_STATE_SHARD_COUNT = 100;
 const UNKNOWN_COUNTRY = 'unknown';
 
+interface CostMetrics {
+	cacheReads: number;
+	cacheWrites: number;
+	cacheHit: boolean;
+}
+
 interface JWKWithKid extends JsonWebKey {
 	kid?: string;
 }
@@ -224,7 +230,13 @@ function getShardId(value: string, numShards: number): number {
 	return hash % numShards;
 }
 
-function writeApiLatency(request: Request, env: Env, status: number, durationMs: number): void {
+function writeCostMetrics(
+	request: Request,
+	env: Env,
+	status: number,
+	durationMs: number,
+	metrics: CostMetrics
+): void {
 	if (!env.ANALYTICS_ENGINE) {
 		return;
 	}
@@ -233,7 +245,13 @@ function writeApiLatency(request: Request, env: Env, status: number, durationMs:
 	const country = typeof request.cf?.country === 'string' ? request.cf.country : UNKNOWN_COUNTRY;
 	env.ANALYTICS_ENGINE.writeDataPoint({
 		indexes: [url.pathname],
-		doubles: [durationMs, status],
+		doubles: [
+			durationMs,
+			status,
+			metrics.cacheHit ? 1 : 0,
+			metrics.cacheReads,
+			metrics.cacheWrites,
+		],
 		blobs: [url.pathname, country, request.method],
 	});
 }
@@ -282,13 +300,16 @@ async function fetchResilientAPI(
 	url: string,
 	request: Request,
 	headers: Headers,
-	ctx: ExecutionContext
+	ctx: ExecutionContext,
+	metrics: CostMetrics
 ): Promise<Response> {
 	const cacheKey = getCacheKey(url, request);
 	const cache = caches.default;
 
+	metrics.cacheReads++;
 	const cached = await cache.match(cacheKey);
 	if (cached) {
+		metrics.cacheHit = true;
 		return cached;
 	}
 
@@ -296,6 +317,7 @@ async function fetchResilientAPI(
 		const originResponse = await fetchWithTimeout(url, headers);
 
 		if (originResponse.ok) {
+			metrics.cacheWrites++;
 			ctx.waitUntil(
 				cache.put(cacheKey, originResponse.clone()).catch((error) => {
 					console.warn('Cache put failed:', error);
@@ -315,7 +337,8 @@ async function fetchResilientAPI(
 async function fetchConfiguredAPIs(
 	request: Request,
 	env: Env,
-	ctx: ExecutionContext
+	ctx: ExecutionContext,
+	metrics: CostMetrics
 ): Promise<Response> {
 	const { API_KEY: apiKey, API_ENDPOINT: endpoint } = env;
 
@@ -333,7 +356,7 @@ async function fetchConfiguredAPIs(
 	headers.set('Authorization', `Bearer ${apiKey}`);
 
 	const [user, posts, comments] = await Promise.all(
-		urls.map((url) => fetchResilientAPI(url, request, headers, ctx))
+		urls.map((url) => fetchResilientAPI(url, request, headers, ctx, metrics))
 	);
 
 	if (!user.ok || !posts.ok || !comments.ok) {
@@ -563,11 +586,30 @@ async function handleUserStateRequest(request: Request, env: Env): Promise<Respo
 	return new Response('Not found', { status: 404 });
 }
 
+function handleHealthRequest(request: Request): Response | null {
+	const url = new URL(request.url);
+	if (url.pathname !== '/health') {
+		return null;
+	}
+
+	return Response.json({
+		status: 'ok',
+		service: 'my-edge-app',
+		timestamp: new Date().toISOString(),
+	});
+}
+
 async function routeRequest(
 	request: Request,
 	env: Env,
-	ctx: ExecutionContext
+	ctx: ExecutionContext,
+	metrics: CostMetrics
 ): Promise<Response> {
+	const healthResponse = handleHealthRequest(request);
+	if (healthResponse) {
+		return healthResponse;
+	}
+
 	// Define middleware stack
 	const middlewares: Middleware[] = [withCORS, withAuth];
 
@@ -610,7 +652,7 @@ async function routeRequest(
 	}
 
 	// Proceed with request
-	return fetchConfiguredAPIs(currentRequest, env, ctx);
+	return fetchConfiguredAPIs(currentRequest, env, ctx, metrics);
 }
 
 export async function handler(
@@ -619,13 +661,18 @@ export async function handler(
 	ctx: ExecutionContext
 ): Promise<Response> {
 	const startTime = Date.now();
+	const metrics: CostMetrics = {
+		cacheReads: 0,
+		cacheWrites: 0,
+		cacheHit: false,
+	};
 
 	try {
-		const response = await routeRequest(request, env, ctx);
-		writeApiLatency(request, env, response.status, Date.now() - startTime);
+		const response = await routeRequest(request, env, ctx, metrics);
+		writeCostMetrics(request, env, response.status, Date.now() - startTime, metrics);
 		return response;
 	} catch (error) {
-		writeApiLatency(request, env, 500, Date.now() - startTime);
+		writeCostMetrics(request, env, 500, Date.now() - startTime, metrics);
 		throw error;
 	}
 }

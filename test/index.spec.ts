@@ -80,6 +80,32 @@ afterEach(() => {
 });
 
 describe('JWT auth middleware', () => {
+	it('serves an unauthenticated health check for deployment monitoring', async () => {
+		const { dataset, points } = createAnalyticsEngine();
+		const ctx = createExecutionContext();
+		const response = await handler(
+			new Request('https://app.example.com/health'),
+			createEnv('https://issuer.example.com/health/jwks.json', {
+				ANALYTICS_ENGINE: dataset,
+			}),
+			ctx
+		);
+
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			status: 'ok',
+			service: 'my-edge-app',
+			timestamp: expect.any(String),
+		});
+		expect(points).toHaveLength(1);
+		expect(points[0]).toMatchObject({
+			indexes: ['/health'],
+			doubles: [expect.any(Number), 200, 0, 0, 0],
+			blobs: ['/health', 'unknown', 'GET'],
+		});
+	});
+
 	it('returns 401 when the bearer token is missing', async () => {
 		const ctx = createExecutionContext();
 		const response = await handler(
@@ -111,7 +137,7 @@ describe('JWT auth middleware', () => {
 		expect(points).toHaveLength(1);
 		expect(points[0]).toEqual({
 			indexes: ['/api/profile'],
-			doubles: [expect.any(Number), 401],
+			doubles: [expect.any(Number), 401, 0, 0, 0],
 			blobs: ['/api/profile', 'US', 'GET'],
 		});
 		expect(points[0].doubles?.[0]).toBeGreaterThanOrEqual(0);
@@ -607,6 +633,7 @@ describe('JWT auth middleware', () => {
 	it('serves cached API responses when the origin fails later', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
+		const { dataset, points } = createAnalyticsEngine();
 		const kid = crypto.randomUUID();
 		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
 		const endpoint = `https://api.example.test/${kid}/profile`;
@@ -651,6 +678,7 @@ describe('JWT auth middleware', () => {
 			request,
 			createEnv(jwksUrl, {
 				API_ENDPOINT: endpoint,
+				ANALYTICS_ENGINE: dataset,
 			}),
 			firstCtx
 		);
@@ -671,6 +699,7 @@ describe('JWT auth middleware', () => {
 			request,
 			createEnv(jwksUrl, {
 				API_ENDPOINT: endpoint,
+				ANALYTICS_ENGINE: dataset,
 			}),
 			secondCtx
 		);
@@ -683,6 +712,17 @@ describe('JWT auth middleware', () => {
 			comments: { resource: 'comments', from: 'origin' },
 		});
 		expect(apiFetches).toBe(3);
+		expect(points).toHaveLength(2);
+		expect(points[0]).toEqual({
+			indexes: ['/api/profile'],
+			doubles: [expect.any(Number), 200, 0, 3, 3],
+			blobs: ['/api/profile', 'unknown', 'GET'],
+		});
+		expect(points[1]).toEqual({
+			indexes: ['/api/profile'],
+			doubles: [expect.any(Number), 200, 1, 3, 0],
+			blobs: ['/api/profile', 'unknown', 'GET'],
+		});
 	});
 
 	it('returns 503 when the API origin fails and no cache entry exists', async () => {

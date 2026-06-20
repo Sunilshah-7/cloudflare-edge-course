@@ -19,8 +19,9 @@ export { UserState } from './userState';
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
 
 const ORIGIN_TIMEOUT_MS = 5000;
-const RATE_LIMIT_DEFAULT_LIMIT = 100;
+const RATE_LIMIT_DEFAULT_LIMIT = 1000;
 const RATE_LIMIT_DEFAULT_WINDOW_SECONDS = 60;
+const RATE_LIMIT_SHARD_COUNT = 10;
 const USER_STATE_SHARD_COUNT = 100;
 const UNKNOWN_COUNTRY = 'unknown';
 const USER_ID_PATTERN = /^[a-z0-9]{1,32}$/;
@@ -204,7 +205,8 @@ async function withRateLimit(request: Request, env: Env) {
 	const userId = request.headers.get('X-User-ID') || request.headers.get('CF-Connecting-IP');
 	if (!userId) return request;
 
-	const result = await env.RATE_LIMITER.getByName(userId).check(
+	const { limiter, shardId, shardKey } = getRateLimitShard(env, userId);
+	const result = await limiter.check(
 		userId,
 		RATE_LIMIT_DEFAULT_LIMIT,
 		RATE_LIMIT_DEFAULT_WINDOW_SECONDS
@@ -213,8 +215,8 @@ async function withRateLimit(request: Request, env: Env) {
 		return new Response('Rate limited', {
 			status: 429,
 			headers: {
+				...getRateLimitHeaders(result, shardId, shardKey),
 				'Retry-After': result.retryAfter.toString(),
-				'X-RateLimit-Remaining': '0',
 			},
 		});
 	}
@@ -239,6 +241,30 @@ function parseFiniteNumber(value: string | null): number | null {
 function getShardId(value: string, numShards: number): number {
 	const hash = Array.from(value).reduce((acc, char) => acc + char.charCodeAt(0), 0);
 	return hash % numShards;
+}
+
+function getRateLimitShard(env: Env, userId: string) {
+	const shardId = getShardId(userId, RATE_LIMIT_SHARD_COUNT);
+	const shardKey = `shard:${shardId}`;
+
+	return {
+		shardId,
+		shardKey,
+		limiter: env.RATE_LIMITER.getByName(shardKey),
+	};
+}
+
+function getRateLimitHeaders(
+	result: { remaining: number; resetAt: number },
+	shardId: number,
+	shardKey: string
+): Record<string, string> {
+	return {
+		'X-RateLimit-Remaining': result.remaining.toString(),
+		'X-RateLimit-Reset': Math.ceil(result.resetAt / 1000).toString(),
+		'X-RateLimit-Shard': shardId.toString(),
+		'X-RateLimit-Shard-Key': shardKey,
+	};
 }
 
 function writeCostMetrics(
@@ -481,11 +507,9 @@ async function handleRateLimitRequest(request: Request, env: Env): Promise<Respo
 		url.searchParams.get('window'),
 		RATE_LIMIT_DEFAULT_WINDOW_SECONDS
 	);
-	const result = await env.RATE_LIMITER.getByName(userId).check(userId, limit, windowSeconds);
-	const headers = {
-		'X-RateLimit-Remaining': result.remaining.toString(),
-		'X-RateLimit-Reset': Math.ceil(result.resetAt / 1000).toString(),
-	};
+	const { limiter, shardId, shardKey } = getRateLimitShard(env, userId);
+	const result = await limiter.check(userId, limit, windowSeconds);
+	const headers = getRateLimitHeaders(result, shardId, shardKey);
 
 	if (!result.allowed) {
 		return new Response('Rate limited', {

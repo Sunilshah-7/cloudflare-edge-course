@@ -440,12 +440,78 @@ describe('JWT auth middleware', () => {
 			})
 		);
 		const statuses = responses.map((response) => response.status).sort();
+		const shards = new Set(
+			responses.map((response) => response.headers.get('X-RateLimit-Shard'))
+		);
+		const shardKeys = new Set(
+			responses.map((response) => response.headers.get('X-RateLimit-Shard-Key'))
+		);
 
 		expect(statuses).toEqual([200, 200, 429, 429, 429]);
+		expect(shards.size).toBe(1);
+		expect(shardKeys.size).toBe(1);
 		for (const response of responses.filter((response) => response.status === 429)) {
 			expect(response.headers.get('Retry-After')).toBeTruthy();
 			expect(await response.text()).toBe('Rate limited');
 		}
+	});
+
+	it('routes rate limit checks through deterministic Durable Object shards', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: `rate_shard_user_${kid}`,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		const authedEnv = createEnv(jwksUrl);
+		const authHeaders = { Authorization: `Bearer ${token}` };
+
+		async function checkUser(userId: string) {
+			const ctx = createExecutionContext();
+			const response = await handler(
+				new Request(
+					`https://app.example.com/ratelimit/check?user_id=${userId}&limit=10&window=60`,
+					{
+						headers: authHeaders,
+					}
+				),
+				authedEnv,
+				ctx
+			);
+			await waitOnExecutionContext(ctx);
+			return response;
+		}
+
+		const firstAlice = await checkUser('alice');
+		const secondAlice = await checkUser('alice');
+		const bob = await checkUser('bob');
+
+		expect(firstAlice.status).toBe(200);
+		expect(secondAlice.status).toBe(200);
+		expect(bob.status).toBe(200);
+		expect(firstAlice.headers.get('X-RateLimit-Shard')).toBe(
+			secondAlice.headers.get('X-RateLimit-Shard')
+		);
+		expect(firstAlice.headers.get('X-RateLimit-Shard-Key')).toBe(
+			secondAlice.headers.get('X-RateLimit-Shard-Key')
+		);
+		expect(firstAlice.headers.get('X-RateLimit-Shard')).not.toBe(
+			bob.headers.get('X-RateLimit-Shard')
+		);
 	});
 
 	it('enqueues items and processes only one item while the lock is held', async () => {

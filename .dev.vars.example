@@ -1,0 +1,4 @@
+API_KEY=replace-with-local-api-key
+API_ENDPOINT=https://dev.example.com
+DEBUG=true
+JWKS_URL=https://issuer.example.com/.well-known/jwks.json

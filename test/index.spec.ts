@@ -1,6 +1,6 @@
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import worker from '../src';
+import { handler } from '../src';
 
 const encoder = new TextEncoder();
 
@@ -50,10 +50,14 @@ async function createKeyPair(kid: string) {
 	};
 }
 
-function createEnv(jwksUrl: string): Env {
+function createEnv(jwksUrl: string, overrides: Partial<Env> = {}): Env {
 	return {
 		...env,
 		JWKS_URL: jwksUrl,
+		API_KEY: 'test-api-key',
+		API_ENDPOINT: 'https://api.example.test/data',
+		DEBUG: false,
+		...overrides,
 	};
 }
 
@@ -65,7 +69,7 @@ afterEach(() => {
 describe('JWT auth middleware', () => {
 	it('returns 401 when the bearer token is missing', async () => {
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(
+		const response = await handler(
 			new Request('https://app.example.com/api/profile'),
 			createEnv('https://issuer.example.com/missing-token/jwks.json'),
 			ctx
@@ -76,7 +80,8 @@ describe('JWT auth middleware', () => {
 		expect(await response.text()).toBe('Unauthorized');
 	});
 
-	it('verifies a JWT and forwards user headers', async () => {
+	it('verifies a JWT and calls the configured API with secret auth and user headers', async () => {
+		const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 		const kid = crypto.randomUUID();
 		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
 		const { privateKey, publicJwk } = await createKeyPair(kid);
@@ -100,6 +105,8 @@ describe('JWT auth middleware', () => {
 
 			return new Response(
 				JSON.stringify({
+					url: request.url,
+					authorization: request.headers.get('Authorization'),
 					userId: request.headers.get('X-User-ID'),
 					scope: request.headers.get('X-User-Scope'),
 				}),
@@ -108,20 +115,27 @@ describe('JWT auth middleware', () => {
 		});
 
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(
+		const response = await handler(
 			new Request('https://app.example.com/api/profile', {
 				headers: { Authorization: `Bearer ${token}` },
 			}),
-			createEnv(jwksUrl),
+			createEnv(jwksUrl, {
+				API_KEY: 'upstream-secret',
+				API_ENDPOINT: 'https://api.example.test/profile',
+				DEBUG: true,
+			}),
 			ctx
 		);
 
 		await waitOnExecutionContext(ctx);
 		expect(response.status).toBe(200);
 		await expect(response.json()).resolves.toEqual({
+			url: 'https://api.example.test/profile',
+			authorization: 'Bearer upstream-secret',
 			userId: 'user_123',
 			scope: 'read:profile write:profile',
 		});
+		expect(log).toHaveBeenCalledWith('Calling https://api.example.test/profile');
 	});
 
 	it('returns 401 when the JWT signature is invalid', async () => {
@@ -149,7 +163,7 @@ describe('JWT auth middleware', () => {
 		});
 
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(
+		const response = await handler(
 			new Request('https://app.example.com/api/profile', {
 				headers: { Authorization: `Bearer ${token}` },
 			}),

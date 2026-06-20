@@ -10,7 +10,6 @@
  *
  * Learn more at https://developers.cloudflare.com/workers/
  */
-import { isFeatureFlagEnabled, isFeatureFlagSimple } from './featureFlags';
 
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
 
@@ -193,25 +192,54 @@ async function withRateLimit(request: Request, env: Env) {
 	return request;
 }
 
+function isDebugEnabled(debug: Env['DEBUG']): boolean {
+	return debug === true || debug === 'true';
+}
+
+async function fetchConfiguredAPI(request: Request, env: Env): Promise<Response> {
+	const { API_KEY: apiKey, API_ENDPOINT: endpoint } = env;
+
+	if (!apiKey || !endpoint) {
+		return new Response('API configuration missing', { status: 500 });
+	}
+
+	if (isDebugEnabled(env.DEBUG)) {
+		console.log(`Calling ${endpoint}`);
+	}
+
+	const headers = new Headers(request.headers);
+	headers.set('Authorization', `Bearer ${apiKey}`);
+
+	return fetch(endpoint, {
+		headers,
+	});
+}
+
+export async function handler(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext
+): Promise<Response> {
+	// Define middleware stack
+	const middlewares: Middleware[] = [withCORS, withAuth];
+
+	if (request.url.includes('/api/risky')) {
+		middlewares.push(withRateLimit);
+	}
+
+	let currentRequest = request;
+	for (const middleware of middlewares) {
+		const result = await middleware(currentRequest, env);
+		if (result instanceof Response) {
+			return result;
+		}
+		currentRequest = result;
+	}
+
+	// Proceed with request
+	return fetchConfiguredAPI(currentRequest, env);
+}
+
 export default {
-	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		// Define middleware stack
-		const middlewares: Middleware[] = [withCORS, withAuth];
-
-		if (request.url.includes('/api/risky')) {
-			middlewares.push(withRateLimit);
-		}
-
-		let currentRequest = request;
-		for (const middleware of middlewares) {
-			const result = await middleware(currentRequest, env);
-			if (result instanceof Response) {
-				return result;
-			}
-			currentRequest = result;
-		}
-
-		// Proceed with request
-		return fetch(currentRequest);
-	},
+	fetch: handler,
 } satisfies ExportedHandler<Env>;

@@ -38,7 +38,27 @@
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
 	 */
 	"vars": {
-		"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json"
+		"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
+		"API_ENDPOINT": "https://dev.example.com",
+		"DEBUG": true
+	},
+	"env": {
+		"staging": {
+			"name": "my-worker-staging",
+			"vars": {
+				"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
+				"API_ENDPOINT": "https://staging.example.com",
+				"DEBUG": true
+			}
+		},
+		"production": {
+			"name": "my-worker-production",
+			"vars": {
+				"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
+				"API_ENDPOINT": "https://api.example.com",
+				"DEBUG": false
+			}
+		}
 	},
 	/**
 	 * Service Bindings (communicate between multiple Workers)
@@ -51,12 +71,14 @@
 	 */
 	"kv_namespaces": [
 		{
-			"binding": "FEATURE_FLAGS",
-			"id": "FEATURE_FLAGS_NAMESPACE_PLACEHOLDER"
+			"binding": "RATE_LIMIT",
+			"id": "f9970c5f33564421992afc087ba8c75f",
+			"remote": true
 		},
 		{
-			"binding": "RATE_LIMIT",
-			"id": "RATE_LIMIT_NAMESPACE_PLACEHOLDER"
+			"binding": "FEATURE_FLAGS",
+			"id": "95009321d8af4bd994c470262def7472",
+			"remote": true
 		}
 	]
 }

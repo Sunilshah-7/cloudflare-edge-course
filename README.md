@@ -5,25 +5,20 @@ A **30-day intensive course on distributed edge computing** with Cloudflare, des
 ## Course Structure
 
 ### **Week 1: Edge Computing Fundamentals** (Days 1–7)
-
 Foundation concepts: edge vs. traditional infrastructure, Cloudflare's global network, latency trade-offs, and Workers runtime basics.
 
 ### **Week 2: Workers & Request Handling** (Days 8–14)
-
 Deep dive into Cloudflare Workers: request/response handling, middleware patterns, deployment, debugging, and performance optimization.
 
 ### **Week 3: Stateful Edge with Durable Objects** (Days 15–21)
-
 Distributed state management: Durable Objects architecture, coordination patterns, SQL databases, and consistency models for the edge.
 
 ### **Week 4: Analytics, Observability & Production** (Days 22–30)
-
 Monitoring at scale: Analytics Engine, real-time dashboards, production patterns, cost optimization, and security considerations.
 
 ## Daily Format
 
 Each lesson includes:
-
 - **Concepts**: Technical deep-dive (5 min read)
 - **Practical Focus**: Hands-on code or configuration (5 min)
 - **Key Takeaway**: Core insight to retain
@@ -94,17 +89,8 @@ Focus on the core mental models—the specific APIs and syntax matter less than 
 
 ## Table of Contents
 
-- [Cloudflare Edge Computing Masterclass](#cloudflare-edge-computing-masterclass)
-  - [Course Structure](#course-structure)
-    - [**Week 1: Edge Computing Fundamentals** (Days 1–7)](#week-1-edge-computing-fundamentals-days-17)
-    - [**Week 2: Workers \& Request Handling** (Days 8–14)](#week-2-workers--request-handling-days-814)
-    - [**Week 3: Stateful Edge with Durable Objects** (Days 15–21)](#week-3-stateful-edge-with-durable-objects-days-1521)
-    - [**Week 4: Analytics, Observability \& Production** (Days 22–30)](#week-4-analytics-observability--production-days-2230)
-  - [Daily Format](#daily-format)
-  - [Labs \& Capstone](#labs--capstone)
-  - [Getting Started](#getting-started)
-  - [Quick Reference](#quick-reference)
-  - [Prerequisites](#prerequisites)
-  - [Structure Navigation](#structure-navigation)
-  - [Author's Notes](#authors-notes)
-  - [Table of Contents](#table-of-contents)
+- [Week 1: Fundamentals](#week-1-edge-computing-fundamentals-days-1–7)
+- [Week 2: Workers](#week-2-workers--request-handling-days-8–14)
+- [Week 3: Durable Objects](#week-3-stateful-edge-with-durable-objects-days-15–21)
+- [Week 4: Production](#week-4-analytics-observability--production-days-22–30)
+- [Labs & Reference](#labs--reference)

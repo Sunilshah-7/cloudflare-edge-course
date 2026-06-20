@@ -280,6 +280,62 @@ describe('JWT auth middleware', () => {
 		expect(await response.text()).toBe('Unauthorized');
 	});
 
+	it('serves a secure user API with validated IDs and security headers', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: 'secure_user',
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		async function apiUser(path: string, method = 'GET') {
+			const ctx = createExecutionContext();
+			const response = await handler(
+				new Request(`https://app.example.com${path}`, {
+					method,
+					headers: { Authorization: `Bearer ${token}` },
+				}),
+				createEnv(jwksUrl),
+				ctx
+			);
+			await waitOnExecutionContext(ctx);
+			return response;
+		}
+
+		const ok = await apiUser('/api/user?id=alice123');
+		expect(ok.status).toBe(200);
+		expect(ok.headers.get('Content-Type')).toContain('application/json');
+		expect(ok.headers.get('Content-Security-Policy')).toBe("default-src 'self'");
+		expect(ok.headers.get('X-Content-Type-Options')).toBe('nosniff');
+		await expect(ok.json()).resolves.toEqual({ id: 'alice123', name: 'Alice' });
+
+		const invalid = await apiUser('/api/user?id=Alice_123');
+		expect(invalid.status).toBe(400);
+		expect(invalid.headers.get('X-Content-Type-Options')).toBe('nosniff');
+		await expect(invalid.json()).resolves.toEqual({ error: 'Invalid user ID' });
+
+		const missing = await apiUser('/api/user?id=missing');
+		expect(missing.status).toBe(404);
+		await expect(missing.json()).resolves.toEqual({ error: 'Not found' });
+
+		const wrongMethod = await apiUser('/api/user?id=alice123', 'POST');
+		expect(wrongMethod.status).toBe(405);
+		await expect(wrongMethod.json()).resolves.toEqual({ error: 'Method not allowed' });
+	});
+
 	it('stores a per-user counter in a Durable Object', async () => {
 		const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 		const kid = crypto.randomUUID();

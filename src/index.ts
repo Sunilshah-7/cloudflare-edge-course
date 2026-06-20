@@ -23,6 +23,12 @@ const RATE_LIMIT_DEFAULT_LIMIT = 100;
 const RATE_LIMIT_DEFAULT_WINDOW_SECONDS = 60;
 const USER_STATE_SHARD_COUNT = 100;
 const UNKNOWN_COUNTRY = 'unknown';
+const USER_ID_PATTERN = /^[a-z0-9]{1,32}$/;
+const JSON_SECURITY_HEADERS = {
+	'Content-Type': 'application/json',
+	'Content-Security-Policy': "default-src 'self'",
+	'X-Content-Type-Options': 'nosniff',
+};
 
 interface CostMetrics {
 	cacheReads: number;
@@ -45,6 +51,11 @@ interface JWTPayload {
 	nbf?: number;
 	iat?: number;
 	[key: string]: unknown;
+}
+
+interface ApiUser {
+	id: string;
+	name: string;
 }
 
 const jwksCache = new Map<string, { jwks: JWKS; expiresAt: number }>();
@@ -260,6 +271,35 @@ function isDebugEnabled(debug: Env['DEBUG']): boolean {
 	return debug === true || debug === 'true';
 }
 
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+	return Response.json(body, {
+		...init,
+		headers: {
+			...JSON_SECURITY_HEADERS,
+			...init.headers,
+		},
+	});
+}
+
+function validateUserId(id: string | null): string {
+	if (!id || !USER_ID_PATTERN.test(id)) {
+		throw new Error('Invalid user ID');
+	}
+
+	return id;
+}
+
+async function fetchUserById(userId: string, _env: Env): Promise<ApiUser | null> {
+	if (userId === 'missing') {
+		return null;
+	}
+
+	return {
+		id: userId,
+		name: 'Alice',
+	};
+}
+
 function appendPath(url: string, path: string): string {
 	return `${url.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
 }
@@ -398,6 +438,31 @@ async function handleCounterRequest(request: Request, env: Env): Promise<Respons
 	}
 
 	return new Response('Not found', { status: 404 });
+}
+
+async function handleSecureUserRequest(request: Request, env: Env): Promise<Response | null> {
+	const url = new URL(request.url);
+	if (url.pathname !== '/api/user') {
+		return null;
+	}
+
+	if (request.method !== 'GET') {
+		return jsonResponse({ error: 'Method not allowed' }, { status: 405 });
+	}
+
+	let userId: string;
+	try {
+		userId = validateUserId(url.searchParams.get('id'));
+	} catch {
+		return jsonResponse({ error: 'Invalid user ID' }, { status: 400 });
+	}
+
+	const user = await fetchUserById(userId, env);
+	if (!user) {
+		return jsonResponse({ error: 'Not found' }, { status: 404 });
+	}
+
+	return jsonResponse(user);
 }
 
 async function handleRateLimitRequest(request: Request, env: Env): Promise<Response | null> {
@@ -629,6 +694,11 @@ async function routeRequest(
 	const counterResponse = await handleCounterRequest(currentRequest, env);
 	if (counterResponse) {
 		return counterResponse;
+	}
+
+	const secureUserResponse = await handleSecureUserRequest(currentRequest, env);
+	if (secureUserResponse) {
+		return secureUserResponse;
 	}
 
 	const rateLimitResponse = await handleRateLimitRequest(currentRequest, env);

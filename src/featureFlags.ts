@@ -89,7 +89,7 @@ export async function isFeatureFlagEnabled(
         headers: {
           'Accept': 'application/json',
           // Pass along useful headers for origin to make decisions
-          'CF-IPCountry': request.cf?.country || '',
+          'CF-IPCountry': String(request.cf?.country || ''),
           'User-Agent': request.headers.get('User-Agent') || ''
         }
       }

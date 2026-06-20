@@ -12,6 +12,126 @@
  */
 import { isFeatureFlagEnabled, isFeatureFlagSimple } from './featureFlags';
 
+type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
+
+interface JWKWithKid extends JsonWebKey {
+	kid?: string;
+}
+
+interface JWKS {
+	keys: JWKWithKid[];
+}
+
+interface JWTPayload {
+	sub?: string;
+	scope?: string;
+	exp?: number;
+	nbf?: number;
+	iat?: number;
+	[key: string]: unknown;
+}
+
+const jwksCache = new Map<string, { jwks: JWKS; expiresAt: number }>();
+
+function decodeBase64Url(value: string): ArrayBuffer {
+	const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+	const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+	const binary = atob(padded);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) {
+		bytes[i] = binary.charCodeAt(i);
+	}
+	return bytes.buffer;
+}
+
+function decodeBase64UrlJson<T>(value: string): T {
+	const decoder = new TextDecoder();
+	return JSON.parse(decoder.decode(decodeBase64Url(value))) as T;
+}
+
+function getMaxAge(cacheControl: string | null): number {
+	const maxAge = cacheControl?.match(/(?:^|,\s*)max-age=(\d+)/i)?.[1];
+	return maxAge ? Number(maxAge) : 300;
+}
+
+async function fetchJWKS(jwksUrl: string): Promise<JWKS> {
+	const cached = jwksCache.get(jwksUrl);
+	if (cached && cached.expiresAt > Date.now()) {
+		return cached.jwks;
+	}
+
+	const response = await fetch(jwksUrl, {
+		headers: { Accept: 'application/json' },
+	});
+
+	if (!response.ok) {
+		throw new Error(`JWKS fetch failed: ${response.status}`);
+	}
+
+	const jwks = (await response.json()) as JWKS;
+	jwksCache.set(jwksUrl, {
+		jwks,
+		expiresAt: Date.now() + getMaxAge(response.headers.get('Cache-Control')) * 1000,
+	});
+	return jwks;
+}
+
+async function verifyJWT(token: string, jwksUrl: string): Promise<JWTPayload> {
+	const parts = token.split('.');
+	if (parts.length !== 3) {
+		throw new Error('Invalid JWT format');
+	}
+
+	const [encodedHeader, encodedPayload, encodedSignature] = parts;
+	const header = decodeBase64UrlJson<{ alg?: string; kid?: string }>(encodedHeader);
+	const payload = decodeBase64UrlJson<JWTPayload>(encodedPayload);
+
+	if (header.alg !== 'RS256') {
+		throw new Error('Unsupported JWT algorithm');
+	}
+
+	if (!header.kid) {
+		throw new Error('JWT header missing kid');
+	}
+
+	const jwks = await fetchJWKS(jwksUrl);
+	const jwk = jwks.keys.find((key) => key.kid === header.kid);
+	if (!jwk) {
+		throw new Error('No matching JWKS key');
+	}
+
+	const key = await crypto.subtle.importKey(
+		'jwk',
+		jwk,
+		{
+			name: 'RSASSA-PKCS1-v1_5',
+			hash: 'SHA-256',
+		},
+		false,
+		['verify']
+	);
+
+	const data = new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`);
+	const signature = decodeBase64Url(encodedSignature);
+	const verified = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, signature, data);
+	if (!verified) {
+		throw new Error('Invalid JWT signature');
+	}
+
+	const now = Math.floor(Date.now() / 1000);
+	if (payload.exp !== undefined && payload.exp <= now) {
+		throw new Error('JWT expired');
+	}
+	if (payload.nbf !== undefined && payload.nbf > now) {
+		throw new Error('JWT not active');
+	}
+	if (!payload.sub) {
+		throw new Error('JWT missing sub');
+	}
+
+	return payload;
+}
+
 async function withCORS(request: Request) {
 	if (request.method === 'OPTIONS') {
 		return new Response(null, {
@@ -26,16 +146,29 @@ async function withCORS(request: Request) {
 }
 
 async function withAuth(request: Request, env: Env) {
-	const token = request.headers.get('Authorization')?.replace('Bearer ', '');
+	const auth = request.headers.get('Authorization');
+	const token = auth?.match(/^Bearer\s+(.+)$/i)?.[1];
 	if (!token) {
 		return new Response('Unauthorized', { status: 401 });
 	}
 
-	const user = { id: 'user123' };
+	if (!env.JWKS_URL) {
+		return new Response('Auth configuration missing', { status: 500 });
+	}
 
-	const newRequest = request.clone();
-	newRequest.headers.set('X-User-Id', user.id);
-	return newRequest;
+	try {
+		const user = await verifyJWT(token, env.JWKS_URL);
+		const headers = new Headers(request.headers);
+		headers.set('X-User-ID', user.sub!);
+		if (typeof user.scope === 'string') {
+			headers.set('X-User-Scope', user.scope);
+		}
+
+		return new Request(request, { headers });
+	} catch (error) {
+		console.warn('JWT verification failed:', error);
+		return new Response('Unauthorized', { status: 401 });
+	}
 }
 
 async function withRateLimit(request: Request, env: Env) {
@@ -63,7 +196,7 @@ async function withRateLimit(request: Request, env: Env) {
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		// Define middleware stack
-		const middlewares = [withCORS, withAuth];
+		const middlewares: Middleware[] = [withCORS, withAuth];
 
 		if (request.url.includes('/api/risky')) {
 			middlewares.push(withRateLimit);
@@ -76,11 +209,6 @@ export default {
 				return result;
 			}
 			currentRequest = result;
-		}
-
-		// Skip rate limiting for non-targeted endpoints
-		if (!request.url.includes('/api/risky')) {
-			return fetch(request);
 		}
 
 		// Proceed with request

@@ -14,138 +14,38 @@ import { isFeatureFlagEnabled, isFeatureFlagSimple } from './featureFlags';
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
-		const url = new URL(request.url);
+		// Skip rate limiting for non-targeted endpoints
+		if(!request.url.includes('/api/risky')){
+			return fetch(request);
+		}
 
-		// Cache GET /api/products using Cloudflare Cache API with surrogate keys
-		if (url.pathname === '/api/products' && request.method === 'GET') {
-			const cacheKey = new Request(url.toString(), { method: 'GET' });
-			const cache = caches.default;
+		// Get client IP from Cloudflare header
+		const ip = request.headers.get('CF-Connecting-IP');
+		if(!ip){
+			// Handle missing IP
+			return fetch(request);
+		}
 
-			let response = await cache.match(cacheKey);
-			if (response) {
-				// Optionally add a header to indicate cache hit
-				response.headers.set('X-Cache', 'HIT');
-				return response;
-			}
+		const key = `ratelimit:${ip}`;
+		const limit = 100;
+		const window = 60;
 
-			// Cache miss: fetch from origin
-			const originResponse = await fetch(`https://api.example.com${url.pathname}`);
-			if (!originResponse.ok) {
-				// If origin fails, return error without caching
-				return originResponse;
-			}
+		// Get current count for this IP
+		const count = parseInt(await env.RATE_LIMIT.get(key) || '0');
 
-			const body = await originResponse.json();
-
-			response = new Response(JSON.stringify(body), {
-				status: 200,
-				headers: {
-					'Content-Type': 'application/json',
-					'Cache-Control': 'public, max-age=300, s-maxage=3600',
-					'Cache-Tag': 'products,api' // surrogate key for purging
-				}
+		// Check if limit exceeded
+		if (count >= limit){
+			return new Response('Rate limited', {
+				status: 429,
+				headers: {'Retry-After': window.toString() }
 			});
-
-			// Store a clone in the cache (response is a ReadableStream, cloning lets us return one and cache another)
-			await cache.put(cacheKey, response.clone());
-			response.headers.set('X-Cache', 'MISS');
-			return response;
 		}
 
-		// Example 1: Simple boolean flag to enable/disable a new feature
-		const useNewRouting = await isFeatureFlagSimple(
-			env.FEATURE_FLAGS,
-			'new-routing-algorithm',
-			request,
-			false // Default to false (use existing logic)
-		);
+		// Increment counter with expiration
+		await env.RATE_LIMIT.put(key, (count + 1).toString(), {expirationTtl: window });
 
-		// Example 2: Flag with rollout percentage and targeting
-		const showNewUI = await isFeatureFlagEnabled(
-			env.FEATURE_FLAGS,
-			'new-user-interface',
-			request,
-			{
-				defaultValue: false,
-				rolloutPercentage: 25, // Gradual rollout to 25% of users
-				targeting: {
-					countries: ['US', 'CA', 'GB', 'DE'], // Only in these countries
-					deviceTypes: ['mobile'] // Only for mobile users initially
-				},
-				cacheTtlSeconds: 300 // Cache for 5 minutes (more frequent updates for UI changes)
-			}
-		);
+		// Proceed with request
+		return fetch(request);
+	}
 
-		// 1. Read the User-Agent header
-		const ua = request.headers.get('User-Agent') || '';
-		const isMobile = /mobile|android/i.test(ua);
-
-		// 2. Get Cloudflare colo (data center location)
-		const colo = request.cf?.colo || 'unknown';
-
-		// 3. Route traffic - controlled by feature flag
-		let originUrl;
-		if (useNewRouting) {
-			// New routing logic: route based on geography instead of just device type
-			if (colo === 'LHR' || colo === 'CDG') {
-				// European traffic goes to EU origin
-				originUrl = 'https://eu-origin.example.com';
-			} else if (colo === 'SFO' || colo === 'LAX') {
-				// West US traffic goes to US-West origin
-				originUrl = 'https://us-west.example.com';
-			} else {
-				// Default to US-East for everywhere else
-				originUrl = 'https://us-east.example.com';
-			}
-		} else {
-			// Existing logic: route based on device type
-			originUrl = isMobile ? 'https://mobile.example.com' : 'https://www.example.com';
-		}
-
-		const urlObj = new URL(request.url);
-		urlObj.host = originUrl.split('//')[1];
-
-		// 4. Create new request with custom headers
-		const newRequest = new Request(urlObj, request);
-		newRequest.headers.set('X-Forwarded-By', 'edge-worker');
-		newRequest.headers.set('X-Is-Mobile', isMobile ? 'true' : 'false');
-		newRequest.headers.set('X-Edge-Location', colo); // Add custom header with colo
-
-		// Example 3: Conditionally add headers based on feature flags
-		if (showNewUI) {
-			newRequest.headers.set('X-New-UI-Enabled', 'true');
-			newRequest.headers.set('X-UI-Version', 'v2');
-		} else {
-			newRequest.headers.set('X-New-UI-Enabled', 'false');
-		}
-
-		try {
-			const response = await fetch(newRequest);
-			response.headers.set('X-Edge-Cached', 'true');
-			response.headers.set('X-Edge-Location', colo);
-
-			// Add feature flag info to response headers for debugging
-			response.headers.set('X-Flag-New-Routing', useNewRouting ? 'true' : 'false');
-			response.headers.set('X-Flag-New-UI', showNewUI ? 'true' : 'false');
-
-			return response;
-		} catch (error) {
-			// Return a helpful error message instead of crashing
-			return new Response(
-				`Origin fetch failed: ${error.message}\n` +
-				`Is mobile: ${isMobile}\n` +
-				`Cloudflare colo: ${colo}\n` +
-				`Trying to reach: ${originUrl}\n` +
-				`New routing enabled: ${useNewRouting}\n` +
-				`New UI enabled: ${showNewUI}\n\n` +
-				`Note: In local development, external domains like example.com\n` +
-				`may not be accessible. This is expected behavior.\n` +
-				`For production, replace with your actual origin URLs.`,
-				{
-					status: 502,
-					headers: { 'Content-Type': 'text/plain' }
-				}
-			);
-		}
-	},
 } satisfies ExportedHandler<Env>;

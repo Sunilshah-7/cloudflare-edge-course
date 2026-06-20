@@ -51,6 +51,10 @@
 		{
 			"binding": "FEATURE_FLAGS",
 			"id": "FEATURE_FLAGS_NAMESPACE_PLACEHOLDER"
+		},
+		{
+			"binding": "RATE_LIMIT",
+			"id": "RATE_LIMIT_NAMESPACE_PLACEHOLDER"
 		}
 	]
 }

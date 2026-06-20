@@ -1,0 +1,241 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "my-edge-app",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-04-08",
+	"account_id": "d11eec141ab17a90adc23a8fba1023aa",
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public"
+	],
+	"assets": {
+		// The path to the directory containing the `index.html` file to be served at `/`
+		"directory": "./public"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"analytics_engine_datasets": [
+		{
+			"binding": "ANALYTICS_ENGINE",
+			"dataset": "api_latency"
+		}
+	],
+	"upload_source_maps": true,
+	/**
+	 * Smart Placement
+	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
+	 */
+	// "placement": {  "mode": "smart" }
+	/**
+	 * Bindings
+	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
+	 * databases, object storage, AI inference, real-time communication and more.
+	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
+	 */
+	/**
+	 * Environment Variables
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 * Note: Use secrets to store sensitive data.
+	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 */
+	"vars": {
+		"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
+		"API_ENDPOINT": "https://dev.example.com",
+		"DEBUG": true
+	},
+	"env": {
+		"staging": {
+			"name": "my-worker-staging",
+			"vars": {
+				"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
+				"API_ENDPOINT": "https://staging.example.com",
+				"DEBUG": true
+			},
+			"analytics_engine_datasets": [
+				{
+					"binding": "ANALYTICS_ENGINE",
+					"dataset": "api_latency_staging"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "COUNTER",
+						"class_name": "Counter"
+					},
+					{
+						"name": "RATE_LIMITER",
+						"class_name": "RateLimiter"
+					},
+					{
+						"name": "QUEUE",
+						"class_name": "Queue"
+					},
+					{
+						"name": "USER_LEDGER",
+						"class_name": "UserLedger"
+					},
+					{
+						"name": "USER_STATE",
+						"class_name": "UserState"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": ["Counter"]
+				},
+				{
+					"tag": "v2",
+					"new_sqlite_classes": ["RateLimiter"]
+				},
+				{
+					"tag": "v3",
+					"new_sqlite_classes": ["Queue"]
+				},
+				{
+					"tag": "v4",
+					"new_sqlite_classes": ["UserLedger"]
+				},
+				{
+					"tag": "v5",
+					"new_sqlite_classes": ["UserState"]
+				}
+			]
+		},
+		"production": {
+			"name": "my-worker-production",
+			"vars": {
+				"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
+				"API_ENDPOINT": "https://api.example.com",
+				"DEBUG": false
+			},
+			"analytics_engine_datasets": [
+				{
+					"binding": "ANALYTICS_ENGINE",
+					"dataset": "api_latency_production"
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "COUNTER",
+						"class_name": "Counter"
+					},
+					{
+						"name": "RATE_LIMITER",
+						"class_name": "RateLimiter"
+					},
+					{
+						"name": "QUEUE",
+						"class_name": "Queue"
+					},
+					{
+						"name": "USER_LEDGER",
+						"class_name": "UserLedger"
+					},
+					{
+						"name": "USER_STATE",
+						"class_name": "UserState"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": ["Counter"]
+				},
+				{
+					"tag": "v2",
+					"new_sqlite_classes": ["RateLimiter"]
+				},
+				{
+					"tag": "v3",
+					"new_sqlite_classes": ["Queue"]
+				},
+				{
+					"tag": "v4",
+					"new_sqlite_classes": ["UserLedger"]
+				},
+				{
+					"tag": "v5",
+					"new_sqlite_classes": ["UserState"]
+				}
+			]
+		}
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "COUNTER",
+				"class_name": "Counter"
+			},
+			{
+				"name": "RATE_LIMITER",
+				"class_name": "RateLimiter"
+			},
+			{
+				"name": "QUEUE",
+				"class_name": "Queue"
+			},
+			{
+				"name": "USER_LEDGER",
+				"class_name": "UserLedger"
+			},
+			{
+				"name": "USER_STATE",
+				"class_name": "UserState"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["Counter"]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["RateLimiter"]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": ["Queue"]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": ["UserLedger"]
+		},
+		{
+			"tag": "v5",
+			"new_sqlite_classes": ["UserState"]
+		}
+	],
+	/**
+	 * Service Bindings (communicate between multiple Workers)
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
+	 */
+	// Add a QUEUE_HANDLER service binding here when deploying queue processing.
+	// "services": [  {   "binding": "QUEUE_HANDLER",   "service": "queue-handler"  } ],
+	/**
+	 * Feature Flags KV Namespace
+	 * Stores feature flag configurations with origin fallback and caching
+	 */
+	"kv_namespaces": [
+		{
+			"binding": "RATE_LIMIT",
+			"id": "f9970c5f33564421992afc087ba8c75f",
+			"remote": true
+		},
+		{
+			"binding": "FEATURE_FLAGS",
+			"id": "95009321d8af4bd994c470262def7472",
+			"remote": true
+		}
+	]
+}

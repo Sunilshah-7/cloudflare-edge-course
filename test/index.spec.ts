@@ -218,6 +218,7 @@ describe('JWT auth middleware', () => {
 	});
 
 	it('stores a per-user counter in a Durable Object', async () => {
+		const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 		const kid = crypto.randomUUID();
 		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
 		const { privateKey, publicJwk } = await createKeyPair(kid);
@@ -260,6 +261,28 @@ describe('JWT auth middleware', () => {
 		await expect((await counter('increment')).text()).resolves.toBe('2');
 		await expect((await counter('get')).text()).resolves.toBe('2');
 		await expect((await counter('get', otherUserToken)).text()).resolves.toBe('0');
+
+		const counterLogs = log.mock.calls
+			.map(([entry]) => JSON.parse(entry as string) as Record<string, unknown>)
+			.filter((entry) => entry.doClass === 'Counter');
+		expect(counterLogs).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					level: 'info',
+					doClass: 'Counter',
+					event: 'counter.increment',
+					oldValue: 0,
+					newValue: 1,
+				}),
+			])
+		);
+		expect(counterLogs[0]).toEqual(
+			expect.objectContaining({
+				timestamp: expect.any(String),
+				doId: expect.any(String),
+				durationMs: expect.any(Number),
+			})
+		);
 	});
 
 	it('rate limits concurrent requests with Durable Object storage transactions', async () => {

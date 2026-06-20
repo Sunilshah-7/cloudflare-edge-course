@@ -456,6 +456,94 @@ describe('JWT auth middleware', () => {
 		});
 	});
 
+	it('routes user state to deterministic shards and isolates preferences by user', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const userId = `state_user_${kid}`;
+		const otherUserId = `state_other_user_${kid}`;
+		const userToken = await createSignedJWT(privateKey, kid, {
+			sub: userId,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+		const otherUserToken = await createSignedJWT(privateKey, kid, {
+			sub: otherUserId,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		async function userState(path: string, token = userToken) {
+			const ctx = createExecutionContext();
+			const response = await handler(
+				new Request(`https://app.example.com${path}`, {
+					method: 'POST',
+					headers: { Authorization: `Bearer ${token}` },
+				}),
+				createEnv(jwksUrl),
+				ctx
+			);
+			await waitOnExecutionContext(ctx);
+			return response;
+		}
+
+		const setTheme = await userState('/user-state/set-preference?key=theme&value=dark');
+		expect(setTheme.status).toBe(200);
+		const setThemeBody = (await setTheme.json()) as {
+			userId: string;
+			shardId: number;
+			shardKey: string;
+			preference: { key: string; value: string };
+		};
+		expect(setThemeBody.userId).toBe(userId);
+		expect(setThemeBody.shardKey).toBe(`user-state:${setThemeBody.shardId}`);
+		expect(setThemeBody.preference).toMatchObject({ key: 'theme', value: 'dark' });
+
+		await expect((await userState('/user-state/set-preference?key=density&value=compact')).json())
+			.resolves.toMatchObject({
+				userId,
+				shardId: setThemeBody.shardId,
+				shardKey: setThemeBody.shardKey,
+				preference: { key: 'density', value: 'compact' },
+			});
+		await expect((await userState('/user-state/set-preference?key=theme&value=light', otherUserToken)).json())
+			.resolves.toMatchObject({
+				userId: otherUserId,
+				preference: { key: 'theme', value: 'light' },
+			});
+
+		await expect((await userState('/user-state/get-preference?key=theme')).json()).resolves
+			.toMatchObject({
+				userId,
+				shardId: setThemeBody.shardId,
+				shardKey: setThemeBody.shardKey,
+				preference: { key: 'theme', value: 'dark' },
+			});
+		await expect((await userState('/user-state/get-preference?key=theme', otherUserToken)).json())
+			.resolves.toMatchObject({
+				userId: otherUserId,
+				preference: { key: 'theme', value: 'light' },
+			});
+
+		const preferences = (await (await userState('/user-state/preferences')).json()) as {
+			preferences: Array<{ key: string; value: string }>;
+		};
+		expect(preferences.preferences).toMatchObject([
+			{ key: 'density', value: 'compact' },
+			{ key: 'theme', value: 'dark' },
+		]);
+	});
+
 	it('serves cached API responses when the origin fails later', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 

@@ -14,12 +14,14 @@ export { Counter } from './counter';
 export { Queue } from './queue';
 export { RateLimiter } from './rateLimiter';
 export { UserLedger } from './userLedger';
+export { UserState } from './userState';
 
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
 
 const ORIGIN_TIMEOUT_MS = 5000;
 const RATE_LIMIT_DEFAULT_LIMIT = 100;
 const RATE_LIMIT_DEFAULT_WINDOW_SECONDS = 60;
+const USER_STATE_SHARD_COUNT = 100;
 
 interface JWKWithKid extends JsonWebKey {
 	kid?: string;
@@ -214,6 +216,11 @@ function parseFiniteNumber(value: string | null): number | null {
 
 	const parsed = Number(value);
 	return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getShardId(value: string, numShards: number): number {
+	const hash = Array.from(value).reduce((acc, char) => acc + char.charCodeAt(0), 0);
+	return hash % numShards;
 }
 
 function isDebugEnabled(debug: Env['DEBUG']): boolean {
@@ -479,6 +486,68 @@ async function handleLedgerRequest(request: Request, env: Env): Promise<Response
 	return new Response('Not found', { status: 404 });
 }
 
+async function handleUserStateRequest(request: Request, env: Env): Promise<Response | null> {
+	const url = new URL(request.url);
+	if (!url.pathname.startsWith('/user-state/')) {
+		return null;
+	}
+
+	const userId = url.searchParams.get('user_id') || request.headers.get('X-User-ID');
+	if (!userId) {
+		return new Response('User required', { status: 400 });
+	}
+
+	const shardId = getShardId(userId, USER_STATE_SHARD_COUNT);
+	const shardKey = `user-state:${shardId}`;
+	const shard = env.USER_STATE.getByName(shardKey);
+
+	if (url.pathname === '/user-state/set-preference') {
+		if (request.method !== 'POST' && request.method !== 'GET') {
+			return new Response('Method not allowed', { status: 405 });
+		}
+
+		const key = url.searchParams.get('key');
+		const value = url.searchParams.get('value');
+		if (!key || value === null) {
+			return new Response('Preference key and value required', { status: 400 });
+		}
+
+		const preference = await shard.setPreference(userId, key, value);
+		return Response.json({
+			status: 'set',
+			userId,
+			shardId,
+			shardKey,
+			preference,
+		});
+	}
+
+	if (url.pathname === '/user-state/get-preference') {
+		const key = url.searchParams.get('key');
+		if (!key) {
+			return new Response('Preference key required', { status: 400 });
+		}
+
+		return Response.json({
+			userId,
+			shardId,
+			shardKey,
+			preference: await shard.getPreference(userId, key),
+		});
+	}
+
+	if (url.pathname === '/user-state/preferences') {
+		return Response.json({
+			userId,
+			shardId,
+			shardKey,
+			preferences: await shard.listPreferences(userId),
+		});
+	}
+
+	return new Response('Not found', { status: 404 });
+}
+
 export async function handler(
 	request: Request,
 	env: Env,
@@ -518,6 +587,11 @@ export async function handler(
 	const ledgerResponse = await handleLedgerRequest(currentRequest, env);
 	if (ledgerResponse) {
 		return ledgerResponse;
+	}
+
+	const userStateResponse = await handleUserStateRequest(currentRequest, env);
+	if (userStateResponse) {
+		return userStateResponse;
 	}
 
 	// Proceed with request

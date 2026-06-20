@@ -67,6 +67,10 @@
 					{
 						"name": "USER_LEDGER",
 						"class_name": "UserLedger"
+					},
+					{
+						"name": "USER_STATE",
+						"class_name": "UserState"
 					}
 				]
 			},
@@ -86,6 +90,10 @@
 				{
 					"tag": "v4",
 					"new_sqlite_classes": ["UserLedger"]
+				},
+				{
+					"tag": "v5",
+					"new_sqlite_classes": ["UserState"]
 				}
 			]
 		},
@@ -113,6 +121,10 @@
 					{
 						"name": "USER_LEDGER",
 						"class_name": "UserLedger"
+					},
+					{
+						"name": "USER_STATE",
+						"class_name": "UserState"
 					}
 				]
 			},
@@ -132,6 +144,10 @@
 				{
 					"tag": "v4",
 					"new_sqlite_classes": ["UserLedger"]
+				},
+				{
+					"tag": "v5",
+					"new_sqlite_classes": ["UserState"]
 				}
 			]
 		}
@@ -153,6 +169,10 @@
 			{
 				"name": "USER_LEDGER",
 				"class_name": "UserLedger"
+			},
+			{
+				"name": "USER_STATE",
+				"class_name": "UserState"
 			}
 		]
 	},
@@ -172,6 +192,10 @@
 		{
 			"tag": "v4",
 			"new_sqlite_classes": ["UserLedger"]
+		},
+		{
+			"tag": "v5",
+			"new_sqlite_classes": ["UserState"]
 		}
 	],
 	/**

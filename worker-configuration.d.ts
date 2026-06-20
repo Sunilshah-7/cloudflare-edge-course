@@ -4,6 +4,7 @@ import type { Counter } from './src/counter';
 import type { Queue } from './src/queue';
 import type { RateLimiter } from './src/rateLimiter';
 import type { UserLedger } from './src/userLedger';
+import type { UserState } from './src/userState';
 
 declare global {
 	interface Env {
@@ -18,6 +19,7 @@ declare global {
 		QUEUE_HANDLER?: Fetcher;
 		RATE_LIMITER: DurableObjectNamespace<RateLimiter>;
 		USER_LEDGER: DurableObjectNamespace<UserLedger>;
+		USER_STATE: DurableObjectNamespace<UserState>;
 	}
 }
 

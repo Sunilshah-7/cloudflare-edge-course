@@ -217,6 +217,51 @@ describe('JWT auth middleware', () => {
 		expect(await response.text()).toBe('Unauthorized');
 	});
 
+	it('stores a per-user counter in a Durable Object', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const userToken = await createSignedJWT(privateKey, kid, {
+			sub: 'counter_user',
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+		const otherUserToken = await createSignedJWT(privateKey, kid, {
+			sub: 'counter_other_user',
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		async function counter(path: 'get' | 'increment', token = userToken) {
+			const ctx = createExecutionContext();
+			const response = await handler(
+				new Request(`https://app.example.com/counter/${path}`, {
+					headers: { Authorization: `Bearer ${token}` },
+				}),
+				createEnv(jwksUrl),
+				ctx
+			);
+			await waitOnExecutionContext(ctx);
+			return response;
+		}
+
+		await expect((await counter('get')).text()).resolves.toBe('0');
+		await expect((await counter('increment')).text()).resolves.toBe('1');
+		await expect((await counter('increment')).text()).resolves.toBe('2');
+		await expect((await counter('get')).text()).resolves.toBe('2');
+		await expect((await counter('get', otherUserToken)).text()).resolves.toBe('0');
+	});
+
 	it('serves cached API responses when the origin fails later', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 

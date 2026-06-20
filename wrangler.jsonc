@@ -49,7 +49,21 @@
 				"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
 				"API_ENDPOINT": "https://staging.example.com",
 				"DEBUG": true
-			}
+			},
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "COUNTER",
+						"class_name": "Counter"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": ["Counter"]
+				}
+			]
 		},
 		"production": {
 			"name": "my-worker-production",
@@ -57,9 +71,37 @@
 				"JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
 				"API_ENDPOINT": "https://api.example.com",
 				"DEBUG": false
-			}
+			},
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "COUNTER",
+						"class_name": "Counter"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": ["Counter"]
+				}
+			]
 		}
 	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "COUNTER",
+				"class_name": "Counter"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["Counter"]
+		}
+	],
 	/**
 	 * Service Bindings (communicate between multiple Workers)
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings

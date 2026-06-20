@@ -10,6 +10,7 @@
  *
  * Learn more at https://developers.cloudflare.com/workers/
  */
+export { Counter } from './counter';
 
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
 
@@ -309,6 +310,30 @@ async function fetchConfiguredAPIs(
 	});
 }
 
+async function handleCounterRequest(request: Request, env: Env): Promise<Response | null> {
+	const url = new URL(request.url);
+	if (!url.pathname.startsWith('/counter/')) {
+		return null;
+	}
+
+	const userId = request.headers.get('X-User-ID');
+	if (!userId) {
+		return new Response('User context missing', { status: 500 });
+	}
+
+	const counter = env.COUNTER.getByName(userId);
+
+	if (url.pathname === '/counter/get') {
+		return new Response((await counter.get()).toString());
+	}
+
+	if (url.pathname === '/counter/increment') {
+		return new Response((await counter.increment()).toString());
+	}
+
+	return new Response('Not found', { status: 404 });
+}
+
 export async function handler(
 	request: Request,
 	env: Env,
@@ -328,6 +353,11 @@ export async function handler(
 			return result;
 		}
 		currentRequest = result;
+	}
+
+	const counterResponse = await handleCounterRequest(currentRequest, env);
+	if (counterResponse) {
+		return counterResponse;
 	}
 
 	// Proceed with request

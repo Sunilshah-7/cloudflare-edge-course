@@ -380,6 +380,82 @@ describe('JWT auth middleware', () => {
 		await expect((await queueRequest('/queue/size')).json()).resolves.toEqual({ size: 1 });
 	});
 
+	it('stores ledger entries in SQL and returns per-user balances', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const userToken = await createSignedJWT(privateKey, kid, {
+			sub: `ledger_user_${kid}`,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+		const otherUserToken = await createSignedJWT(privateKey, kid, {
+			sub: `ledger_other_user_${kid}`,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		async function ledger(path: string, token = userToken) {
+			const ctx = createExecutionContext();
+			const response = await handler(
+				new Request(`https://app.example.com${path}`, {
+					method: 'POST',
+					headers: { Authorization: `Bearer ${token}` },
+				}),
+				createEnv(jwksUrl),
+				ctx
+			);
+			await waitOnExecutionContext(ctx);
+			return response;
+		}
+
+		const first = await ledger('/ledger/add?amount=10.5&description=deposit');
+		expect(first.status).toBe(200);
+		const firstBody = (await first.json()) as {
+			status: string;
+			entry: { id: number; userId: string; amount: number; description: string };
+		};
+		expect(firstBody.status).toBe('added');
+		expect(firstBody.entry.id).toBe(1);
+		expect(firstBody.entry.amount).toBe(10.5);
+		expect(firstBody.entry.description).toBe('deposit');
+
+		await expect((await ledger('/ledger/add?amount=-2.25&description=debit')).json()).resolves
+			.toMatchObject({
+				status: 'added',
+				entry: {
+					amount: -2.25,
+					description: 'debit',
+				},
+			});
+		await expect((await ledger('/ledger/add?amount=7', otherUserToken)).json()).resolves
+			.toMatchObject({
+				status: 'added',
+				entry: {
+					amount: 7,
+				},
+			});
+
+		await expect((await ledger('/ledger/balance')).json()).resolves.toEqual({
+			userId: `ledger_user_${kid}`,
+			balance: 8.25,
+		});
+		await expect((await ledger('/ledger/balance', otherUserToken)).json()).resolves.toEqual({
+			userId: `ledger_other_user_${kid}`,
+			balance: 7,
+		});
+	});
+
 	it('serves cached API responses when the origin fails later', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 

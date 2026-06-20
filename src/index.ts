@@ -13,6 +13,7 @@
 export { Counter } from './counter';
 export { Queue } from './queue';
 export { RateLimiter } from './rateLimiter';
+export { UserLedger } from './userLedger';
 
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
 
@@ -204,6 +205,15 @@ async function withRateLimit(request: Request, env: Env) {
 function parsePositiveInteger(value: string | null, fallback: number): number {
 	const parsed = Number(value);
 	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseFiniteNumber(value: string | null): number | null {
+	if (value === null || value.trim() === '') {
+		return null;
+	}
+
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
 }
 
 function isDebugEnabled(debug: Env['DEBUG']): boolean {
@@ -431,6 +441,44 @@ async function handleQueueRequest(request: Request, env: Env): Promise<Response 
 	return new Response('Not found', { status: 404 });
 }
 
+async function handleLedgerRequest(request: Request, env: Env): Promise<Response | null> {
+	const url = new URL(request.url);
+	if (!url.pathname.startsWith('/ledger/')) {
+		return null;
+	}
+
+	const userId = url.searchParams.get('user_id') || request.headers.get('X-User-ID');
+	if (!userId) {
+		return new Response('User required', { status: 400 });
+	}
+
+	const ledger = env.USER_LEDGER.getByName(userId);
+
+	if (url.pathname === '/ledger/add') {
+		if (request.method !== 'POST' && request.method !== 'GET') {
+			return new Response('Method not allowed', { status: 405 });
+		}
+
+		const amount = parseFiniteNumber(url.searchParams.get('amount'));
+		if (amount === null) {
+			return new Response('Valid amount required', { status: 400 });
+		}
+
+		const description = url.searchParams.get('description');
+		const entry = await ledger.add(userId, amount, description);
+		return Response.json({ status: 'added', entry });
+	}
+
+	if (url.pathname === '/ledger/balance') {
+		return Response.json({
+			userId,
+			balance: await ledger.balance(userId),
+		});
+	}
+
+	return new Response('Not found', { status: 404 });
+}
+
 export async function handler(
 	request: Request,
 	env: Env,
@@ -465,6 +513,11 @@ export async function handler(
 	const queueResponse = await handleQueueRequest(currentRequest, env);
 	if (queueResponse) {
 		return queueResponse;
+	}
+
+	const ledgerResponse = await handleLedgerRequest(currentRequest, env);
+	if (ledgerResponse) {
+		return ledgerResponse;
 	}
 
 	// Proceed with request

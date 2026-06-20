@@ -63,6 +63,10 @@
 					{
 						"name": "QUEUE",
 						"class_name": "Queue"
+					},
+					{
+						"name": "USER_LEDGER",
+						"class_name": "UserLedger"
 					}
 				]
 			},
@@ -78,6 +82,10 @@
 				{
 					"tag": "v3",
 					"new_sqlite_classes": ["Queue"]
+				},
+				{
+					"tag": "v4",
+					"new_sqlite_classes": ["UserLedger"]
 				}
 			]
 		},
@@ -101,6 +109,10 @@
 					{
 						"name": "QUEUE",
 						"class_name": "Queue"
+					},
+					{
+						"name": "USER_LEDGER",
+						"class_name": "UserLedger"
 					}
 				]
 			},
@@ -116,6 +128,10 @@
 				{
 					"tag": "v3",
 					"new_sqlite_classes": ["Queue"]
+				},
+				{
+					"tag": "v4",
+					"new_sqlite_classes": ["UserLedger"]
 				}
 			]
 		}
@@ -133,6 +149,10 @@
 			{
 				"name": "QUEUE",
 				"class_name": "Queue"
+			},
+			{
+				"name": "USER_LEDGER",
+				"class_name": "UserLedger"
 			}
 		]
 	},
@@ -148,6 +168,10 @@
 		{
 			"tag": "v3",
 			"new_sqlite_classes": ["Queue"]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": ["UserLedger"]
 		}
 	],
 	/**

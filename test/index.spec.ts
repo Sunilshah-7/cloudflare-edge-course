@@ -262,6 +262,50 @@ describe('JWT auth middleware', () => {
 		await expect((await counter('get', otherUserToken)).text()).resolves.toBe('0');
 	});
 
+	it('rate limits concurrent requests with Durable Object storage transactions', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: `rate_user_${kid}`,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		const responses = await Promise.all(
+			Array.from({ length: 5 }, async () => {
+				const ctx = createExecutionContext();
+				const response = await handler(
+					new Request('https://app.example.com/ratelimit/check?limit=2&window=60', {
+						headers: { Authorization: `Bearer ${token}` },
+					}),
+					createEnv(jwksUrl),
+					ctx
+				);
+				await waitOnExecutionContext(ctx);
+				return response;
+			})
+		);
+		const statuses = responses.map((response) => response.status).sort();
+
+		expect(statuses).toEqual([200, 200, 429, 429, 429]);
+		for (const response of responses.filter((response) => response.status === 429)) {
+			expect(response.headers.get('Retry-After')).toBeTruthy();
+			expect(await response.text()).toBe('Rate limited');
+		}
+	});
+
 	it('serves cached API responses when the origin fails later', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 

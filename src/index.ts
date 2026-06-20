@@ -11,10 +11,13 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 export { Counter } from './counter';
+export { RateLimiter } from './rateLimiter';
 
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
 
 const ORIGIN_TIMEOUT_MS = 5000;
+const RATE_LIMIT_DEFAULT_LIMIT = 100;
+const RATE_LIMIT_DEFAULT_WINDOW_SECONDS = 60;
 
 interface JWKWithKid extends JsonWebKey {
 	kid?: string;
@@ -176,23 +179,30 @@ async function withAuth(request: Request, env: Env) {
 async function withRateLimit(request: Request, env: Env) {
 	if (!request.url.includes('/api/risky')) return request;
 
-	const ip = request.headers.get('CF-Connecting-IP');
-	if (!ip) return request;
+	const userId = request.headers.get('X-User-ID') || request.headers.get('CF-Connecting-IP');
+	if (!userId) return request;
 
-	const key = `ratelimit:${ip}`;
-	const limit = 100;
-	const window = 60;
-
-	const count = parseInt((await env.RATE_LIMIT.get(key)) || '0');
-	if (count >= limit) {
+	const result = await env.RATE_LIMITER.getByName(userId).check(
+		userId,
+		RATE_LIMIT_DEFAULT_LIMIT,
+		RATE_LIMIT_DEFAULT_WINDOW_SECONDS
+	);
+	if (!result.allowed) {
 		return new Response('Rate limited', {
 			status: 429,
-			headers: { 'Retry-After': window.toString() },
+			headers: {
+				'Retry-After': result.retryAfter.toString(),
+				'X-RateLimit-Remaining': '0',
+			},
 		});
 	}
 
-	await env.RATE_LIMIT.put(key, (count + 1).toString(), { expirationTtl: window });
 	return request;
+}
+
+function parsePositiveInteger(value: string | null, fallback: number): number {
+	const parsed = Number(value);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function isDebugEnabled(debug: Env['DEBUG']): boolean {
@@ -334,6 +344,41 @@ async function handleCounterRequest(request: Request, env: Env): Promise<Respons
 	return new Response('Not found', { status: 404 });
 }
 
+async function handleRateLimitRequest(request: Request, env: Env): Promise<Response | null> {
+	const url = new URL(request.url);
+	if (url.pathname !== '/ratelimit/check') {
+		return null;
+	}
+
+	const userId = url.searchParams.get('user_id') || request.headers.get('X-User-ID');
+	if (!userId) {
+		return new Response('User required', { status: 400 });
+	}
+
+	const limit = parsePositiveInteger(url.searchParams.get('limit'), RATE_LIMIT_DEFAULT_LIMIT);
+	const windowSeconds = parsePositiveInteger(
+		url.searchParams.get('window'),
+		RATE_LIMIT_DEFAULT_WINDOW_SECONDS
+	);
+	const result = await env.RATE_LIMITER.getByName(userId).check(userId, limit, windowSeconds);
+	const headers = {
+		'X-RateLimit-Remaining': result.remaining.toString(),
+		'X-RateLimit-Reset': Math.ceil(result.resetAt / 1000).toString(),
+	};
+
+	if (!result.allowed) {
+		return new Response('Rate limited', {
+			status: 429,
+			headers: {
+				...headers,
+				'Retry-After': result.retryAfter.toString(),
+			},
+		});
+	}
+
+	return new Response('OK', { status: 200, headers });
+}
+
 export async function handler(
 	request: Request,
 	env: Env,
@@ -358,6 +403,11 @@ export async function handler(
 	const counterResponse = await handleCounterRequest(currentRequest, env);
 	if (counterResponse) {
 		return counterResponse;
+	}
+
+	const rateLimitResponse = await handleRateLimitRequest(currentRequest, env);
+	if (rateLimitResponse) {
+		return rateLimitResponse;
 	}
 
 	// Proceed with request

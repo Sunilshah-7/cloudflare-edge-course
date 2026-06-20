@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import type { Counter } from './src/counter';
+import type { RateLimiter } from './src/rateLimiter';
 
 declare global {
 	interface Env {
@@ -11,6 +12,7 @@ declare global {
 		FEATURE_FLAGS: KVNamespace;
 		RATE_LIMIT: KVNamespace;
 		COUNTER: DurableObjectNamespace<Counter>;
+		RATE_LIMITER: DurableObjectNamespace<RateLimiter>;
 	}
 }
 

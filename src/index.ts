@@ -11,6 +11,7 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 export { Counter } from './counter';
+export { Queue } from './queue';
 export { RateLimiter } from './rateLimiter';
 
 type Middleware = (request: Request, env: Env) => Promise<Request | Response>;
@@ -379,6 +380,57 @@ async function handleRateLimitRequest(request: Request, env: Env): Promise<Respo
 	return new Response('OK', { status: 200, headers });
 }
 
+async function handleQueueRequest(request: Request, env: Env): Promise<Response | null> {
+	const url = new URL(request.url);
+	if (!url.pathname.startsWith('/queue/')) {
+		return null;
+	}
+
+	const queue = env.QUEUE.getByName('default');
+
+	if (url.pathname === '/queue/enqueue') {
+		if (request.method !== 'POST' && request.method !== 'GET') {
+			return new Response('Method not allowed', { status: 405 });
+		}
+
+		const item = url.searchParams.get('item');
+		if (!item) {
+			return new Response('Item required', { status: 400 });
+		}
+
+		const size = await queue.enqueue(item);
+		return Response.json({ status: 'enqueued', size });
+	}
+
+	if (url.pathname === '/queue/process') {
+		if (request.method !== 'POST' && request.method !== 'GET') {
+			return new Response('Method not allowed', { status: 405 });
+		}
+
+		try {
+			const result = await queue.processNext();
+			if (result.locked) {
+				return new Response('Already processing', { status: 409 });
+			}
+
+			if (!result.processed) {
+				return new Response('Queue empty');
+			}
+
+			return Response.json({ status: 'processed', item: result.item });
+		} catch (error) {
+			console.error('Queue processing failed:', error);
+			return new Response('Queue processing failed', { status: 502 });
+		}
+	}
+
+	if (url.pathname === '/queue/size') {
+		return Response.json({ size: await queue.size() });
+	}
+
+	return new Response('Not found', { status: 404 });
+}
+
 export async function handler(
 	request: Request,
 	env: Env,
@@ -408,6 +460,11 @@ export async function handler(
 	const rateLimitResponse = await handleRateLimitRequest(currentRequest, env);
 	if (rateLimitResponse) {
 		return rateLimitResponse;
+	}
+
+	const queueResponse = await handleQueueRequest(currentRequest, env);
+	if (queueResponse) {
+		return queueResponse;
 	}
 
 	// Proceed with request

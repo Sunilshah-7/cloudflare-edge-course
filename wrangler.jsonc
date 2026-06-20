@@ -59,6 +59,10 @@
 					{
 						"name": "RATE_LIMITER",
 						"class_name": "RateLimiter"
+					},
+					{
+						"name": "QUEUE",
+						"class_name": "Queue"
 					}
 				]
 			},
@@ -70,6 +74,10 @@
 				{
 					"tag": "v2",
 					"new_sqlite_classes": ["RateLimiter"]
+				},
+				{
+					"tag": "v3",
+					"new_sqlite_classes": ["Queue"]
 				}
 			]
 		},
@@ -89,6 +97,10 @@
 					{
 						"name": "RATE_LIMITER",
 						"class_name": "RateLimiter"
+					},
+					{
+						"name": "QUEUE",
+						"class_name": "Queue"
 					}
 				]
 			},
@@ -100,6 +112,10 @@
 				{
 					"tag": "v2",
 					"new_sqlite_classes": ["RateLimiter"]
+				},
+				{
+					"tag": "v3",
+					"new_sqlite_classes": ["Queue"]
 				}
 			]
 		}
@@ -113,6 +129,10 @@
 			{
 				"name": "RATE_LIMITER",
 				"class_name": "RateLimiter"
+			},
+			{
+				"name": "QUEUE",
+				"class_name": "Queue"
 			}
 		]
 	},
@@ -124,13 +144,18 @@
 		{
 			"tag": "v2",
 			"new_sqlite_classes": ["RateLimiter"]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": ["Queue"]
 		}
 	],
 	/**
 	 * Service Bindings (communicate between multiple Workers)
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
 	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ],
+	// Add a QUEUE_HANDLER service binding here when deploying queue processing.
+	// "services": [  {   "binding": "QUEUE_HANDLER",   "service": "queue-handler"  } ],
 	/**
 	 * Feature Flags KV Namespace
 	 * Stores feature flag configurations with origin fallback and caching

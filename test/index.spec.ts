@@ -306,6 +306,80 @@ describe('JWT auth middleware', () => {
 		}
 	});
 
+	it('enqueues items and processes only one item while the lock is held', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: `queue_user_${kid}`,
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+		const handledItems: unknown[] = [];
+		let markHandlerStarted: (() => void) | undefined;
+		let releaseHandler: (() => void) | undefined;
+		const handlerStarted = new Promise<void>((resolve) => {
+			markHandlerStarted = resolve;
+		});
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			if (request.url === 'http://handler.internal/') {
+				handledItems.push(await request.json());
+				markHandlerStarted?.();
+				await new Promise<void>((release) => {
+					releaseHandler = release;
+				});
+				return new Response('Handled');
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		const authedEnv = createEnv(jwksUrl);
+		const authHeaders = { Authorization: `Bearer ${token}` };
+
+		async function queueRequest(path: string) {
+			const ctx = createExecutionContext();
+			const response = await handler(
+				new Request(`https://app.example.com${path}`, { headers: authHeaders }),
+				authedEnv,
+				ctx
+			);
+			await waitOnExecutionContext(ctx);
+			return response;
+		}
+
+		await expect((await queueRequest('/queue/enqueue?item=alpha')).json()).resolves.toEqual({
+			status: 'enqueued',
+			size: 1,
+		});
+		await expect((await queueRequest('/queue/enqueue?item=beta')).json()).resolves.toEqual({
+			status: 'enqueued',
+			size: 2,
+		});
+
+		const firstProcess = queueRequest('/queue/process');
+		await handlerStarted;
+		const locked = await queueRequest('/queue/process');
+		expect(locked.status).toBe(409);
+		expect(await locked.text()).toBe('Already processing');
+
+		releaseHandler?.();
+		await expect((await firstProcess).json()).resolves.toEqual({
+			status: 'processed',
+			item: 'alpha',
+		});
+		expect(handledItems).toEqual(['alpha']);
+		await expect((await queueRequest('/queue/size')).json()).resolves.toEqual({ size: 1 });
+	});
+
 	it('serves cached API responses when the origin fails later', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 

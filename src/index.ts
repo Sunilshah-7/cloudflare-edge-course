@@ -10,6 +10,8 @@
  *
  * Learn more at https://developers.cloudflare.com/workers/
  */
+import { sendAlert, type AlertSeverity } from './alerts';
+
 export { Counter } from './counter';
 export { Queue } from './queue';
 export { RateLimiter } from './rateLimiter';
@@ -305,6 +307,27 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
 			...init.headers,
 		},
 	});
+}
+
+function getErrorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : 'Unknown error';
+}
+
+function getFailureAlertSeverity(status: number): AlertSeverity {
+	return status >= 500 ? 'critical' : 'warning';
+}
+
+function scheduleAlert(
+	ctx: ExecutionContext,
+	env: Env,
+	message: string,
+	severity: AlertSeverity = 'warning'
+): void {
+	ctx.waitUntil(
+		sendAlert(env, message, severity).catch((error) => {
+			console.warn('Alert delivery failed:', error);
+		})
+	);
 }
 
 function validateUserId(id: string | null): string {
@@ -764,10 +787,26 @@ export async function handler(
 	try {
 		const response = await routeRequest(request, env, ctx, metrics);
 		writeCostMetrics(request, env, response.status, Date.now() - startTime, metrics);
+		if (response.status >= 500) {
+			const url = new URL(request.url);
+			scheduleAlert(
+				ctx,
+				env,
+				`Worker returned ${response.status} for ${request.method} ${url.pathname}`,
+				getFailureAlertSeverity(response.status)
+			);
+		}
 		return response;
 	} catch (error) {
 		writeCostMetrics(request, env, 500, Date.now() - startTime, metrics);
-		throw error;
+		const url = new URL(request.url);
+		scheduleAlert(
+			ctx,
+			env,
+			`Worker error on ${request.method} ${url.pathname}: ${getErrorMessage(error)}`,
+			'critical'
+		);
+		return new Response('Service unavailable', { status: 503 });
 	}
 }
 

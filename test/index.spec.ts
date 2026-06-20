@@ -885,4 +885,117 @@ describe('JWT auth middleware', () => {
 		expect(response.status).toBe(503);
 		expect(await response.text()).toBe('Service unavailable (origin down)');
 	});
+
+	it('sends a Slack alert for 5xx Worker responses', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const slackUrl = `https://hooks.slack.test/${kid}`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: 'user_alert',
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+		const slackPayloads: unknown[] = [];
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			if (request.url === slackUrl) {
+				slackPayloads.push(await request.json());
+				return new Response('ok');
+			}
+
+			throw new Error('Origin unavailable');
+		});
+
+		const ctx = createExecutionContext();
+		const response = await handler(
+			new Request('https://app.example.com/api/profile', {
+				headers: { Authorization: `Bearer ${token}` },
+			}),
+			createEnv(jwksUrl, {
+				API_ENDPOINT: `https://api.example.test/${kid}/profile`,
+				SLACK_WEBHOOK_URL: slackUrl,
+			}),
+			ctx
+		);
+
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(503);
+		expect(slackPayloads).toHaveLength(1);
+		expect(slackPayloads[0]).toMatchObject({
+			attachments: [
+				{
+					color: 'danger',
+					text: 'Worker returned 503 for GET /api/profile',
+					footer: 'Cloudflare Worker',
+					ts: expect.any(Number),
+				},
+			],
+		});
+	});
+
+	it('converts unexpected Worker errors to 503 and sends a critical alert', async () => {
+		const kid = crypto.randomUUID();
+		const jwksUrl = `https://issuer.example.com/${kid}/jwks.json`;
+		const slackUrl = `https://hooks.slack.test/${kid}`;
+		const { privateKey, publicJwk } = await createKeyPair(kid);
+		const token = await createSignedJWT(privateKey, kid, {
+			sub: 'user_alert_error',
+			exp: Math.floor(Date.now() / 1000) + 300,
+		});
+		const slackPayloads: unknown[] = [];
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = input instanceof Request ? input : new Request(input, init);
+
+			if (request.url === jwksUrl) {
+				return new Response(JSON.stringify({ keys: [publicJwk] }), {
+					headers: { 'Content-Type': 'application/json' },
+				});
+			}
+
+			if (request.url === slackUrl) {
+				slackPayloads.push(await request.json());
+				return new Response('ok');
+			}
+
+			return new Response('Unexpected upstream fetch', { status: 500 });
+		});
+
+		const ctx = createExecutionContext();
+		const response = await handler(
+			new Request('https://app.example.com/counter/get', {
+				headers: { Authorization: `Bearer ${token}` },
+			}),
+			createEnv(jwksUrl, {
+				COUNTER: undefined as unknown as Env['COUNTER'],
+				SLACK_WEBHOOK_URL: slackUrl,
+			}),
+			ctx
+		);
+
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(503);
+		expect(await response.text()).toBe('Service unavailable');
+		expect(slackPayloads).toHaveLength(1);
+		expect(slackPayloads[0]).toMatchObject({
+			attachments: [
+				{
+					color: 'danger',
+					text: expect.stringContaining('Worker error on GET /counter/get:'),
+					footer: 'Cloudflare Worker',
+					ts: expect.any(Number),
+				},
+			],
+		});
+	});
 });

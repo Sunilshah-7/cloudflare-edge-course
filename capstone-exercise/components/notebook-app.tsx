@@ -117,6 +117,7 @@ export function NotebookApp() {
 	const flushTimerRef = useRef<number | null>(null);
 	const reconnectTimerRef = useRef<number | null>(null);
 	const clientSeqRef = useRef(0);
+	const shareRequestIdRef = useRef(0);
 
 	const [session, setSession] = useState<Session | null>(null);
 	const [displayName, setDisplayName] = useState('Notebook User');
@@ -134,6 +135,10 @@ export function NotebookApp() {
 	const [title, setTitle] = useState('Untitled notebook');
 	const [toast, setToast] = useState<string | null>(null);
 	const [latencySamples, setLatencySamples] = useState<number[]>([]);
+	const [shareModalOpen, setShareModalOpen] = useState(false);
+	const [shareRole, setShareRole] = useState<'viewer' | 'editor'>('viewer');
+	const [shareLink, setShareLink] = useState('');
+	const [shareGenerating, setShareGenerating] = useState(false);
 
 	const role = documentDetails?.role ?? null;
 	const canEdit = role === 'owner' || role === 'editor';
@@ -393,21 +398,57 @@ export function NotebookApp() {
 		await refreshPermissions();
 	}, [api, docId, grantRole, grantUserId, refreshPermissions, showToast]);
 
-	const createShareLink = useCallback(async () => {
+	const generateShareLink = useCallback(
+		async (nextRole: 'viewer' | 'editor') => {
+			if (!docId) {
+				return;
+			}
+			const requestId = shareRequestIdRef.current + 1;
+			shareRequestIdRef.current = requestId;
+			setShareGenerating(true);
+			try {
+				const data = await api<{ url: string }>(`/api/documents/${encodeURIComponent(docId)}/share`, {
+					method: 'POST',
+					body: JSON.stringify({ role: nextRole }),
+				});
+				if (shareRequestIdRef.current === requestId) {
+					setShareLink(new URL(data.url, window.location.href).href);
+				}
+			} finally {
+				if (shareRequestIdRef.current === requestId) {
+					setShareGenerating(false);
+				}
+			}
+		},
+		[api, docId],
+	);
+
+	const openShareModal = useCallback(() => {
 		if (!docId) {
 			return;
 		}
-		const roleText = window.prompt('Share as viewer or editor?', 'viewer');
-		if (roleText !== 'viewer' && roleText !== 'editor') {
+		setShareRole('viewer');
+		setShareLink('');
+		setShareModalOpen(true);
+		void generateShareLink('viewer').catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Could not create share link'));
+	}, [docId, generateShareLink, showToast]);
+
+	const copyShareLink = useCallback(async () => {
+		if (!shareLink) {
 			return;
 		}
-		const data = await api<{ url: string }>(`/api/documents/${encodeURIComponent(docId)}/share`, {
-			method: 'POST',
-			body: JSON.stringify({ role: roleText }),
-		});
-		await navigator.clipboard.writeText(new URL(data.url, window.location.href).href);
+		await navigator.clipboard.writeText(shareLink);
 		showToast('Share link copied');
-	}, [api, docId, showToast]);
+	}, [shareLink, showToast]);
+
+	const updateShareRole = useCallback(
+		(nextRole: 'viewer' | 'editor') => {
+			setShareRole(nextRole);
+			setShareLink('');
+			void generateShareLink(nextRole).catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Could not create share link'));
+		},
+		[generateShareLink, showToast],
+	);
 
 	useEffect(() => {
 		setDisplayName(window.localStorage.getItem('notebook.name') ?? 'Notebook User');
@@ -564,7 +605,7 @@ export function NotebookApp() {
 					<button type="button" onClick={() => void createDocument()}>
 						New
 					</button>
-					<button type="button" disabled={role !== 'owner'} onClick={() => void createShareLink()}>
+					<button type="button" disabled={role !== 'owner'} onClick={openShareModal}>
 						Share
 					</button>
 				</div>
@@ -671,7 +712,98 @@ export function NotebookApp() {
 			</section>
 
 			{toast ? <div className="toast">{toast}</div> : null}
+			{shareModalOpen ? (
+				<ShareModal
+					documentTitle={documentDetails?.title ?? title}
+					ownerName={session?.name ?? 'You'}
+					ownerId={documentDetails?.ownerId ?? ''}
+					role={shareRole}
+					link={shareLink}
+					generating={shareGenerating}
+					onRoleChange={updateShareRole}
+					onCopy={() => void copyShareLink()}
+					onDone={() => setShareModalOpen(false)}
+				/>
+			) : null}
 		</main>
+	);
+}
+
+function ShareModal({
+	documentTitle,
+	ownerName,
+	ownerId,
+	role,
+	link,
+	generating,
+	onRoleChange,
+	onCopy,
+	onDone,
+}: {
+	documentTitle: string;
+	ownerName: string;
+	ownerId: string;
+	role: 'viewer' | 'editor';
+	link: string;
+	generating: boolean;
+	onRoleChange: (role: 'viewer' | 'editor') => void;
+	onCopy: () => void;
+	onDone: () => void;
+}) {
+	return (
+		<div className="modalOverlay" role="presentation">
+			<section className="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitle">
+				<header className="shareHeader">
+					<h2 id="shareTitle">Share &quot;{documentTitle}&quot;</h2>
+				</header>
+
+				<input className="sharePeopleInput" aria-label="Add people" placeholder="Add people, groups, spaces, and calendar events" disabled />
+
+				<section className="shareSection">
+					<h3>People with access</h3>
+					<div className="accessRow">
+						<div className="avatar" aria-hidden="true">
+							{initials(ownerName)}
+						</div>
+						<div className="accessIdentity">
+							<strong>{ownerName} (you)</strong>
+							<span>{ownerId}</span>
+						</div>
+						<span className="ownerLabel">Owner</span>
+					</div>
+				</section>
+
+				<section className="shareSection">
+					<h3>General access</h3>
+					<div className="generalAccessRow">
+						<div className="linkBadge" aria-hidden="true">
+							@
+						</div>
+						<div className="accessIdentity">
+							<strong>Anyone with the link</strong>
+							<span>Anyone on the internet with the link can {role === 'editor' ? 'edit' : 'view'}</span>
+						</div>
+						<select aria-label="Shared link role" value={role} onChange={(event) => onRoleChange(event.target.value as 'viewer' | 'editor')}>
+							<option value="viewer">Viewer</option>
+							<option value="editor">Editor</option>
+						</select>
+					</div>
+				</section>
+
+				<div className="shareLinkBox">
+					<input aria-label="Generated share link" value={generating ? 'Generating link...' : link} readOnly />
+				</div>
+
+				<footer className="shareFooter">
+					<button type="button" className="copyLinkButton" disabled={!link || generating} onClick={onCopy}>
+						Copy link
+					</button>
+					<button type="button" className="doneButton" onClick={onDone}>
+						Done
+					</button>
+				</footer>
+			</section>
+		</div>
 	);
 }
 
@@ -686,6 +818,15 @@ function PanelHeader({ title, actionLabel, onAction }: { title: string; actionLa
 			) : null}
 		</div>
 	);
+}
+
+function initials(name: string): string {
+	return name
+		.split(/\s+/)
+		.filter(Boolean)
+		.slice(0, 2)
+		.map((part) => part[0]?.toUpperCase() ?? '')
+		.join('');
 }
 
 function throttle(fn: () => void, ms: number): () => void {

@@ -365,8 +365,11 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 		}
 	}
 
-	async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
-		ws.close(code, reason);
+	async webSocketClose(): Promise<void> {
+		this.broadcastUsers();
+	}
+
+	async webSocketError(): Promise<void> {
 		this.broadcastUsers();
 	}
 
@@ -670,11 +673,14 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 
 	private broadcast(message: ServerMessage): void {
 		const data = JSON.stringify(message);
+		let sent = 0;
 		for (const socket of this.ctx.getWebSockets()) {
-			socket.send(data);
+			if (this.trySend(socket, data)) {
+				sent += 1;
+			}
 		}
 		if (this.docId) {
-			this.incrementAnalytics(this.docId, { bytesOut: data.length * this.ctx.getWebSockets().length });
+			this.incrementAnalytics(this.docId, { bytesOut: data.length * sent });
 		}
 	}
 
@@ -682,8 +688,7 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 		const data = JSON.stringify(message);
 		let sent = 0;
 		for (const socket of this.ctx.getWebSockets()) {
-			if (socket !== sender) {
-				socket.send(data);
+			if (socket !== sender && this.trySend(socket, data)) {
 				sent += 1;
 			}
 		}
@@ -698,7 +703,9 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 
 	private send(ws: WebSocket, message: ServerMessage): void {
 		const data = JSON.stringify(message);
-		ws.send(data);
+		if (!this.trySend(ws, data)) {
+			return;
+		}
 		if (this.docId) {
 			this.incrementAnalytics(this.docId, { bytesOut: data.length });
 		}
@@ -711,6 +718,9 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 	private getActiveUsers(): ActiveUser[] {
 		const users = new Map<string, ActiveUser>();
 		for (const socket of this.ctx.getWebSockets()) {
+			if (socket.readyState !== WebSocket.OPEN) {
+				continue;
+			}
 			const attachment = this.getAttachment(socket);
 			if (attachment) {
 				users.set(attachment.userId, {
@@ -723,6 +733,19 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 			}
 		}
 		return [...users.values()].sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	private trySend(socket: WebSocket, data: string): boolean {
+		if (socket.readyState !== WebSocket.OPEN) {
+			return false;
+		}
+
+		try {
+			socket.send(data);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	private getAttachment(ws: WebSocket): ConnectionAttachment | null {

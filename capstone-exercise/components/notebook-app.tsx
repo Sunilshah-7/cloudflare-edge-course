@@ -108,6 +108,7 @@ export function NotebookApp() {
 	const editorHostRef = useRef<HTMLDivElement | null>(null);
 	const editorRef = useRef<EditorView | null>(null);
 	const wsRef = useRef<WebSocket | null>(null);
+	const shouldReconnectRef = useRef(true);
 	const ydocRef = useRef(new Y.Doc());
 	const ytextRef = useRef(ydocRef.current.getText('body'));
 	const applyingRemoteRef = useRef(false);
@@ -276,11 +277,17 @@ export function NotebookApp() {
 		if (!docId) {
 			return;
 		}
-		wsRef.current?.close();
+		if (wsRef.current) {
+			shouldReconnectRef.current = false;
+			const previous = wsRef.current;
+			wsRef.current = null;
+			previous.close(1000, 'reconnecting');
+		}
 		if (reconnectTimerRef.current) {
 			window.clearTimeout(reconnectTimerRef.current);
 			reconnectTimerRef.current = null;
 		}
+		shouldReconnectRef.current = true;
 
 		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 		const socket = new WebSocket(`${protocol}//${window.location.host}/edit/${encodeURIComponent(docId)}`);
@@ -331,6 +338,9 @@ export function NotebookApp() {
 		});
 
 		socket.addEventListener('close', () => {
+			if (wsRef.current !== socket || !shouldReconnectRef.current) {
+				return;
+			}
 			setConnection('Disconnected');
 			setConnectionState('default');
 			reconnectTimerRef.current = window.setTimeout(connectWebSocket, 1000 + Math.floor(Math.random() * 1000));
@@ -498,7 +508,14 @@ export function NotebookApp() {
 		}
 		void (async () => {
 			if (docId) {
-				await openDocument(docId);
+				try {
+					await openDocument(docId);
+				} catch (error) {
+					window.localStorage.removeItem('notebook.docId');
+					setDocId(null);
+					await createDocument();
+					showToast(error instanceof Error ? `Started a new document because the saved one could not be opened: ${error.message}` : 'Started a new document.');
+				}
 			} else {
 				await createDocument();
 			}
@@ -514,9 +531,13 @@ export function NotebookApp() {
 		void refreshAnalytics();
 		void refreshPermissions();
 		return () => {
-			wsRef.current?.close();
+			shouldReconnectRef.current = false;
+			const socket = wsRef.current;
+			wsRef.current = null;
+			socket?.close(1000, 'component cleanup');
 			if (reconnectTimerRef.current) {
 				window.clearTimeout(reconnectTimerRef.current);
+				reconnectTimerRef.current = null;
 			}
 		};
 	}, [connectWebSocket, documentDetails, refreshAnalytics, refreshHistory, refreshPermissions]);

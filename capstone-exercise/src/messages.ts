@@ -27,6 +27,7 @@ export type ClientMessage =
 export type ServerMessage =
 	| {
 			type: 'init';
+			title: string;
 			content: string;
 			snapshot: string;
 			revision: number;
@@ -41,6 +42,7 @@ export type ServerMessage =
 	  }
 	| { type: 'cursor'; userId: string; pos: number; selection: Selection | null }
 	| { type: 'users'; active: ActiveUser[] }
+	| { type: 'title'; title: string; from: string }
 	| { type: 'ack'; clientSeq?: number; revision: number; serverTs: number; clientTs?: number }
 	| { type: 'pong'; serverTs: number; clientTs?: number }
 	| { type: 'error'; code: string; message: string };

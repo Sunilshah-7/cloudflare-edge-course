@@ -55,10 +55,11 @@ type Analytics = {
 };
 
 type ServerMessage =
-	| { type: 'init'; content: string; snapshot: string; revision: number; users: ActiveUser[] }
+	| { type: 'init'; title: string; content: string; snapshot: string; revision: number; users: ActiveUser[] }
 	| { type: 'update'; content: string; update: string; from: string; revision: number }
 	| { type: 'cursor'; userId: string; pos: number; selection: Selection | null }
 	| { type: 'users'; active: ActiveUser[] }
+	| { type: 'title'; title: string; from: string }
 	| { type: 'ack'; clientSeq?: number; revision: number; serverTs: number; clientTs?: number }
 	| { type: 'pong'; serverTs: number; clientTs?: number }
 	| { type: 'error'; code: string; message: string };
@@ -145,6 +146,7 @@ export function NotebookApp() {
 
 	const role = documentDetails?.role ?? null;
 	const canEdit = role === 'owner' || role === 'editor';
+	const loadedDocumentId = documentDetails?.id ?? null;
 	const p95Latency = useMemo(() => {
 		if (latencySamples.length === 0) {
 			return null;
@@ -312,6 +314,10 @@ export function NotebookApp() {
 		socket.addEventListener('message', (event) => {
 			const message = JSON.parse(String(event.data)) as ServerMessage;
 			if (message.type === 'init') {
+				setTitle(message.title);
+				setDocumentDetails((current) =>
+					current && current.title !== message.title ? { ...current, title: message.title } : current,
+				);
 				setRevision(message.revision);
 				setUsers(message.users.filter((user) => user.id !== session?.userId));
 				applyingRemoteRef.current = true;
@@ -332,6 +338,11 @@ export function NotebookApp() {
 				);
 			} else if (message.type === 'users') {
 				setUsers(message.active.filter((user) => user.id !== session?.userId));
+			} else if (message.type === 'title') {
+				setTitle(message.title);
+				setDocumentDetails((current) =>
+					current && current.title !== message.title ? { ...current, title: message.title } : current,
+				);
 			} else if (message.type === 'ack' || message.type === 'pong') {
 				if (message.clientTs) {
 					const clientTs = message.clientTs;
@@ -598,7 +609,7 @@ export function NotebookApp() {
 	}, [bootstrapComplete, createDocument, docId, openDocument, session, showToast]);
 
 	useEffect(() => {
-		if (!documentDetails) {
+		if (!loadedDocumentId) {
 			return;
 		}
 		connectWebSocket();
@@ -615,7 +626,7 @@ export function NotebookApp() {
 				reconnectTimerRef.current = null;
 			}
 		};
-	}, [connectWebSocket, documentDetails, refreshAnalytics, refreshHistory, refreshPermissions]);
+	}, [connectWebSocket, loadedDocumentId, refreshAnalytics, refreshHistory, refreshPermissions]);
 
 	useEffect(() => {
 		editorRef.current?.dispatch({ effects: cursorEffect.of(users) });

@@ -106,6 +106,30 @@ describe('collaborative notebook worker', () => {
 
 		socket.close();
 	});
+
+	it('sends the latest document title over WebSocket init', async () => {
+		const { cookie } = await createSession('Renamer');
+		const created = await createDocument(cookie, 'Original title');
+		const socket = await openSocket(cookie, created.id);
+
+		const init = await waitForMessage<{ type: string; title: string }>(socket);
+		expect(init).toMatchObject({ type: 'init', title: 'Original title' });
+
+		const renameResponse = await SELF.fetch(`http://example.com/api/documents/${created.id}`, {
+			method: 'PATCH',
+			headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ title: 'Live title' }),
+		});
+		expect(renameResponse.status).toBe(200);
+
+		socket.close();
+
+		const nextSocket = await openSocket(cookie, created.id);
+		const nextInit = await waitForMessage<{ type: string; title: string }>(nextSocket);
+		expect(nextInit).toMatchObject({ type: 'init', title: 'Live title' });
+
+		nextSocket.close();
+	});
 });
 
 describe('Yjs conflict behavior', () => {

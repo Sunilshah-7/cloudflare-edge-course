@@ -154,6 +154,11 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 			title,
 			input.docId,
 		);
+		this.broadcast({
+			type: 'title',
+			title,
+			from: input.userId,
+		});
 		return apiResult({ title });
 	}
 
@@ -307,19 +312,20 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 		}
 
 		await this.ensureLoaded(docId);
+		const document = this.getDocumentRow(docId);
 		const state = this.getStateRow(docId);
-		if (!state) {
+		if (!document || !state) {
 			return new Response('Document not found', { status: 404 });
 		}
 
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
-			this.ctx.acceptWebSocket(server);
-			server.serializeAttachment({
-				docId,
-				userId,
-				name,
-				role,
+		this.ctx.acceptWebSocket(server);
+		server.serializeAttachment({
+			docId,
+			userId,
+			name,
+			role,
 			cursor: null,
 			selection: null,
 			connectedAt: Date.now(),
@@ -328,6 +334,7 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 		this.incrementAnalytics(docId, { connectionCount: 1, maxActiveUsers: this.getActiveUsers().length + 1 });
 		this.send(server, {
 			type: 'init',
+			title: document.title,
 			content: state.content,
 			snapshot: bytesToBase64(valueToBytes(state.crdt_snapshot)),
 			revision: state.revision,

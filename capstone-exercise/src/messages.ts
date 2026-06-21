@@ -46,6 +46,7 @@ export type ServerMessage =
 	| { type: 'error'; code: string; message: string };
 
 export type ConnectionAttachment = {
+	docId: string;
 	userId: string;
 	name: string;
 	role: Role;

@@ -360,17 +360,27 @@ export function NotebookApp() {
 		});
 	}, [docId, session?.userId, setEditorContent, showToast]);
 
-	const saveTitle = useCallback(async () => {
+	const persistTitle = useCallback(async () => {
 		if (!docId) {
-			return;
+			return null;
 		}
+		const nextTitle = title.trim() || 'Untitled notebook';
 		const data = await api<{ title: string }>(`/api/documents/${encodeURIComponent(docId)}`, {
 			method: 'PATCH',
-			body: JSON.stringify({ title }),
+			body: JSON.stringify({ title: nextTitle }),
 		});
 		setDocumentDetails((current) => (current ? { ...current, title: data.title } : current));
+		setTitle(data.title);
+		return data.title;
+	}, [api, docId, title]);
+
+	const saveTitle = useCallback(async () => {
+		const savedTitle = await persistTitle();
+		if (!savedTitle) {
+			return;
+		}
 		showToast('Title saved');
-	}, [api, docId, showToast, title]);
+	}, [persistTitle, showToast]);
 
 	const revertChange = useCallback(
 		async (changeId: number, target: 'old' | 'new') => {
@@ -433,8 +443,13 @@ export function NotebookApp() {
 		setShareRole('viewer');
 		setShareLink('');
 		setShareModalOpen(true);
-		void generateShareLink('viewer').catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Could not create share link'));
-	}, [docId, generateShareLink, showToast]);
+		void (async () => {
+			if (canEdit) {
+				await persistTitle();
+			}
+			await generateShareLink('viewer');
+		})().catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Could not create share link'));
+	}, [canEdit, docId, generateShareLink, persistTitle, showToast]);
 
 	const copyShareLink = useCallback(async () => {
 		if (!shareLink) {

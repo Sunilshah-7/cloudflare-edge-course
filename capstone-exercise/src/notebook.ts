@@ -314,11 +314,12 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 
 		const pair = new WebSocketPair();
 		const [client, server] = Object.values(pair);
-		this.ctx.acceptWebSocket(server);
-		server.serializeAttachment({
-			userId,
-			name,
-			role,
+			this.ctx.acceptWebSocket(server);
+			server.serializeAttachment({
+				docId,
+				userId,
+				name,
+				role,
 			cursor: null,
 			selection: null,
 			connectedAt: Date.now(),
@@ -339,17 +340,18 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 
 	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
 		const attachment = this.getAttachment(ws);
-		if (!attachment || !this.docId) {
+		if (!attachment) {
 			this.sendError(ws, 'not_initialized', 'Connection state is unavailable.');
 			return;
 		}
+		await this.ensureLoaded(attachment.docId);
 
 		if (typeof message !== 'string') {
 			this.sendError(ws, 'invalid_message', 'Only JSON text WebSocket messages are accepted.');
 			return;
 		}
 
-		this.incrementAnalytics(this.docId, { bytesIn: message.length });
+		this.incrementAnalytics(attachment.docId, { bytesIn: message.length });
 
 		let parsed: unknown;
 		try {
@@ -398,19 +400,14 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 			return;
 		}
 
-		if (!this.docId) {
-			this.sendError(ws, 'not_initialized', 'Document is not loaded.');
-			return;
-		}
-
-		await this.ensureLoaded(this.docId);
-		let result: { content: string; update: Uint8Array; revision: number };
-		try {
-			if (raw.update) {
-				result = this.applyCrdtUpdate(this.docId, attachment.userId, base64ToBytes(raw.update));
-			} else if (typeof raw.content === 'string') {
-				result = this.replaceContent(this.docId, attachment.userId, raw.content);
-			} else {
+			await this.ensureLoaded(attachment.docId);
+			let result: { content: string; update: Uint8Array; revision: number };
+			try {
+				if (raw.update) {
+					result = this.applyCrdtUpdate(attachment.docId, attachment.userId, base64ToBytes(raw.update));
+				} else if (typeof raw.content === 'string') {
+					result = this.replaceContent(attachment.docId, attachment.userId, raw.content);
+				} else {
 				this.sendError(ws, 'invalid_edit', 'Edit messages require either update or content.');
 				return;
 			}
@@ -753,19 +750,22 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 		if (!attachment || typeof attachment !== 'object') {
 			return null;
 		}
-		const candidate = attachment as Partial<ConnectionAttachment>;
-		if (
-			typeof candidate.userId !== 'string' ||
-			typeof candidate.name !== 'string' ||
+			const candidate = attachment as Partial<ConnectionAttachment>;
+			const docId = typeof candidate.docId === 'string' ? candidate.docId : this.docId;
+			if (
+				typeof docId !== 'string' ||
+				typeof candidate.userId !== 'string' ||
+				typeof candidate.name !== 'string' ||
 			!candidate.role ||
 			!isRole(candidate.role) ||
 			typeof candidate.connectedAt !== 'number'
 		) {
 			return null;
-		}
-		return {
-			userId: candidate.userId,
-			name: candidate.name,
+			}
+			return {
+				docId,
+				userId: candidate.userId,
+				name: candidate.name,
 			role: candidate.role,
 			cursor: typeof candidate.cursor === 'number' ? candidate.cursor : null,
 			selection: candidate.selection ?? null,

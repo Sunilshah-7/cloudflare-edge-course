@@ -17,6 +17,14 @@ type CreateDocumentResponse = {
 	viewUrl: string;
 };
 
+type ActiveUser = {
+	id: string;
+	name: string;
+	role: string;
+	pos: number | null;
+	selection: { anchor: number; head: number } | null;
+};
+
 describe('collaborative notebook worker', () => {
 	it('returns 404 for unknown routes', async () => {
 		const response = await SELF.fetch('http://example.com/unknown');
@@ -154,6 +162,120 @@ describe('collaborative notebook worker', () => {
 
 		nextSocket.close();
 	});
+
+	it('tracks active users when collaborators connect', async () => {
+		const owner = await createSession('Owner');
+		const editor = await createSession('Editor');
+		const created = await createDocument(owner.cookie, 'Connect states');
+		await grantPermission(owner.cookie, created.id, editor.session.userId, 'editor');
+
+		const ownerSocket = await openSocket(owner.cookie, created.id);
+		const ownerInit = await waitForMessage<{ type: string; users: ActiveUser[] }>(ownerSocket);
+		expect(ownerInit).toMatchObject({ type: 'init' });
+		expect(ownerInit.users.map((user) => user.id)).toContain(owner.session.userId);
+
+		const ownerUsersPromise = waitForMessageWhere<{ type: string; active: ActiveUser[] }>(
+			ownerSocket,
+			(message) =>
+				message.type === 'users' &&
+				message.active.some((user) => user.id === owner.session.userId) &&
+				message.active.some((user) => user.id === editor.session.userId),
+			'users with owner and editor',
+		);
+		const editorSocket = await openSocket(editor.cookie, created.id);
+		const editorInit = await waitForMessage<{ type: string; users: ActiveUser[] }>(editorSocket);
+		expect(editorInit).toMatchObject({ type: 'init' });
+		expect(editorInit.users.map((user) => user.id)).toEqual(
+			expect.arrayContaining([owner.session.userId, editor.session.userId]),
+		);
+
+		const usersMessage = await ownerUsersPromise;
+		expect(usersMessage.active).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ id: owner.session.userId, role: 'owner' }),
+				expect.objectContaining({ id: editor.session.userId, role: 'editor' }),
+			]),
+		);
+
+		ownerSocket.close();
+		editorSocket.close();
+	});
+
+	it('broadcasts cursor state to other connected clients', async () => {
+		const owner = await createSession('Cursor Owner');
+		const editor = await createSession('Cursor Editor');
+		const created = await createDocument(owner.cookie, 'Cursor states');
+		await grantPermission(owner.cookie, created.id, editor.session.userId, 'editor');
+
+		const ownerSocket = await openSocket(owner.cookie, created.id);
+		await waitForMessage(ownerSocket, 'init');
+		const editorSocket = await openSocket(editor.cookie, created.id);
+		await waitForMessage(editorSocket, 'init');
+
+		editorSocket.send(JSON.stringify({ type: 'cursor', pos: 42, selection: { anchor: 40, head: 42 } }));
+
+		const cursor = await waitForMessage<{ type: string; userId: string; pos: number; selection: { anchor: number; head: number } | null }>(
+			ownerSocket,
+			'cursor',
+		);
+		expect(cursor).toMatchObject({
+			type: 'cursor',
+			userId: editor.session.userId,
+			pos: 42,
+			selection: { anchor: 40, head: 42 },
+		});
+
+		const users = await waitForMessageWhere<{ type: string; active: ActiveUser[] }>(
+			ownerSocket,
+			(message) =>
+				message.type === 'users' &&
+				message.active.some(
+					(user) => user.id === editor.session.userId && user.pos === 42 && user.selection?.anchor === 40 && user.selection.head === 42,
+				),
+			'users with editor cursor',
+		);
+		expect(users.active).toContainEqual(
+			expect.objectContaining({
+				id: editor.session.userId,
+				pos: 42,
+				selection: { anchor: 40, head: 42 },
+			}),
+		);
+
+		ownerSocket.close();
+		editorSocket.close();
+	});
+
+	it('removes disconnected users from the active users list', async () => {
+		const owner = await createSession('Disconnect Owner');
+		const viewer = await createSession('Disconnect Viewer');
+		const created = await createDocument(owner.cookie, 'Disconnect states');
+		await grantPermission(owner.cookie, created.id, viewer.session.userId, 'viewer');
+
+		const ownerSocket = await openSocket(owner.cookie, created.id);
+		await waitForMessage(ownerSocket, 'init');
+		const viewerConnectedPromise = waitForMessageWhere<{ type: string; active: ActiveUser[] }>(
+			ownerSocket,
+			(message) => message.type === 'users' && message.active.some((user) => user.id === viewer.session.userId),
+			'users with viewer connected',
+		);
+		const viewerSocket = await openSocket(viewer.cookie, created.id);
+		await waitForMessage(viewerSocket, 'init');
+		await viewerConnectedPromise;
+
+		const viewerDisconnectedPromise = waitForMessageWhere<{ type: string; active: ActiveUser[] }>(
+			ownerSocket,
+			(message) => message.type === 'users' && !message.active.some((user) => user.id === viewer.session.userId),
+			'users without disconnected viewer',
+		);
+		viewerSocket.close();
+
+		const usersAfterClose = await viewerDisconnectedPromise;
+		expect(usersAfterClose.active.map((user) => user.id)).toContain(owner.session.userId);
+		expect(usersAfterClose.active.map((user) => user.id)).not.toContain(viewer.session.userId);
+
+		ownerSocket.close();
+	});
 });
 
 describe('Yjs conflict behavior', () => {
@@ -203,6 +325,15 @@ async function createDocument(cookie: string, title: string): Promise<CreateDocu
 	return (await response.json()) as CreateDocumentResponse;
 }
 
+async function grantPermission(cookie: string, docId: string, userId: string, role: 'editor' | 'viewer'): Promise<void> {
+	const response = await SELF.fetch(`http://example.com/api/documents/${docId}/permissions/${encodeURIComponent(userId)}`, {
+		method: 'PUT',
+		headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+		body: JSON.stringify({ role }),
+	});
+	expect(response.status).toBe(200);
+}
+
 async function openSocket(cookie: string, docId: string): Promise<WebSocket> {
 	const response = await SELF.fetch(`http://example.com/edit/${docId}`, {
 		headers: {
@@ -227,6 +358,31 @@ async function waitForMessage<T extends { type: string }>(socket: WebSocket, typ
 		function onMessage(event: MessageEvent): void {
 			const parsed = JSON.parse(String(event.data)) as T;
 			if (type && parsed.type !== type) {
+				return;
+			}
+			clearTimeout(timeout);
+			socket.removeEventListener('message', onMessage);
+			resolve(parsed);
+		}
+
+		socket.addEventListener('message', onMessage);
+	});
+}
+
+async function waitForMessageWhere<T extends { type: string }>(
+	socket: WebSocket,
+	matches: (message: T) => boolean,
+	description: string,
+): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			socket.removeEventListener('message', onMessage);
+			reject(new Error(`Timed out waiting for ${description}`));
+		}, 1500);
+
+		function onMessage(event: MessageEvent): void {
+			const parsed = JSON.parse(String(event.data)) as T;
+			if (!matches(parsed)) {
 				return;
 			}
 			clearTimeout(timeout);

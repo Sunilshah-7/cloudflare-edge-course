@@ -1,6 +1,6 @@
 'use client';
 
-import { StateEffect, StateField } from '@codemirror/state';
+import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -64,6 +64,7 @@ type ServerMessage =
 	| { type: 'error'; code: string; message: string };
 
 const cursorEffect = StateEffect.define<ActiveUser[]>();
+const editableCompartment = new Compartment();
 
 class CursorWidget extends WidgetType {
 	constructor(private readonly user: ActiveUser) {
@@ -461,10 +462,11 @@ export function NotebookApp() {
 			doc: '',
 			parent: editorHostRef.current,
 			extensions: [
-				basicSetup,
-				cursorField,
-				EditorView.lineWrapping,
-				EditorView.updateListener.of((update) => {
+					basicSetup,
+					cursorField,
+					editableCompartment.of(editabilityExtensions(false)),
+					EditorView.lineWrapping,
+					EditorView.updateListener.of((update) => {
 					if (!update.docChanged || applyingRemoteRef.current || !(roleRef.current === 'owner' || roleRef.current === 'editor')) {
 						return;
 					}
@@ -491,7 +493,13 @@ export function NotebookApp() {
 			editor.destroy();
 			editorRef.current = null;
 		};
-	}, [sendCursor]);
+		}, [sendCursor]);
+
+	useEffect(() => {
+		editorRef.current?.dispatch({
+			effects: editableCompartment.reconfigure(editabilityExtensions(canEdit)),
+		});
+	}, [canEdit]);
 
 	useEffect(() => {
 		const ydoc = ydocRef.current;
@@ -663,7 +671,7 @@ export function NotebookApp() {
 
 				<section className="editorColumn">
 					<div className="titleRow">
-						<input aria-label="Document title" value={title} onChange={(event) => setTitle(event.target.value)} />
+						<input aria-label="Document title" value={title} disabled={!canEdit} onChange={(event) => setTitle(event.target.value)} />
 						<button type="button" disabled={!canEdit} onClick={() => void saveTitle()}>
 							Save
 						</button>
@@ -838,6 +846,10 @@ function initials(name: string): string {
 		.slice(0, 2)
 		.map((part) => part[0]?.toUpperCase() ?? '')
 		.join('');
+}
+
+function editabilityExtensions(canEdit: boolean) {
+	return [EditorView.editable.of(canEdit), EditorState.readOnly.of(!canEdit)];
 }
 
 function throttle(fn: () => void, ms: number): () => void {

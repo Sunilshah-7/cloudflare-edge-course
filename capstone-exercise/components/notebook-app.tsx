@@ -714,8 +714,8 @@ export function NotebookApp() {
 			{toast ? <div className="toast">{toast}</div> : null}
 			{shareModalOpen ? (
 				<ShareModal
-					documentTitle={documentDetails?.title ?? title}
-					ownerName={session?.name ?? 'You'}
+					documentTitle={title.trim() || documentDetails?.title || 'Untitled notebook'}
+					ownerName={displayName.trim() || session?.name || 'Notebook User'}
 					ownerId={documentDetails?.ownerId ?? ''}
 					role={shareRole}
 					link={shareLink}

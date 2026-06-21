@@ -301,6 +301,8 @@ The test suite covers:
 - Cursor broadcast state.
 - Active user state on disconnect.
 - Yjs CRDT convergence for concurrent updates.
+- 10 concurrent WebSocket clients connected to the same document.
+- 100 edits per second against one document, with p50/p95/p99 ack latency metrics, in the local Worker test runtime.
 
 ## Deployment
 

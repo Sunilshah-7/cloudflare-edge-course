@@ -25,6 +25,14 @@ type ActiveUser = {
 	selection: { anchor: number; head: number } | null;
 };
 
+type LatencyMetrics = {
+	count: number;
+	p50: number;
+	p95: number;
+	p99: number;
+	max: number;
+};
+
 describe('collaborative notebook worker', () => {
 	it('returns 404 for unknown routes', async () => {
 		const response = await SELF.fetch('http://example.com/unknown');
@@ -222,6 +230,102 @@ describe('collaborative notebook worker', () => {
 		socketA.close();
 		socketB.close();
 	});
+
+	it('handles 10 concurrent clients on the same document', async () => {
+		const clients = await Promise.all(Array.from({ length: 10 }, (_, index) => createSession(`Load Client ${index + 1}`)));
+		const [owner, ...collaborators] = clients;
+		const created = await createDocument(owner.cookie, 'Ten client load');
+
+		await Promise.all(
+			collaborators.map((client) => grantPermission(owner.cookie, created.id, client.session.userId, 'viewer')),
+		);
+
+		const connections = await Promise.all(clients.map((client) => openSocketAndInit(client.cookie, created.id)));
+		const sockets = connections.map((connection) => connection.socket);
+		const connectedUserIds = new Set(connections.flatMap((connection) => connection.init.users.map((user) => user.id)));
+		for (const client of clients) {
+			expect(connectedUserIds.has(client.session.userId)).toBe(true);
+		}
+
+		const documentResponse = await SELF.fetch(`http://example.com/api/documents/${created.id}`, {
+			headers: { Cookie: owner.cookie },
+		});
+		expect(documentResponse.status).toBe(200);
+		const document = (await documentResponse.json()) as { activeUsers: ActiveUser[] };
+		expect(document.activeUsers).toHaveLength(10);
+		expect(document.activeUsers.map((user) => user.id)).toEqual(expect.arrayContaining(clients.map((client) => client.session.userId)));
+
+		const updatePromises = sockets.map((socket) =>
+			waitForMessage<{ type: string; content: string; from: string; revision: number }>(socket, 'update'),
+		);
+		sockets[0].send(JSON.stringify({ type: 'edit', content: 'Broadcast to ten clients', clientSeq: 1, clientTs: Date.now() }));
+
+		const updates = await Promise.all(updatePromises);
+		expect(updates).toHaveLength(10);
+		for (const update of updates) {
+			expect(update).toMatchObject({
+				type: 'update',
+				content: 'Broadcast to ten clients',
+				from: owner.session.userId,
+				revision: 1,
+			});
+		}
+
+		for (const socket of sockets) {
+			socket.close();
+		}
+	});
+
+	it('handles 100 edits per second on one document', async () => {
+		const editor = await createSession('Throughput Editor');
+		const observer = await createSession('Throughput Observer');
+		const created = await createDocument(editor.cookie, 'Hundred edits load');
+		await grantPermission(editor.cookie, created.id, observer.session.userId, 'viewer');
+
+		const editorSocket = await openSocket(editor.cookie, created.id);
+		await waitForMessage(editorSocket, 'init');
+		const observerSocket = await openSocket(observer.cookie, created.id);
+		await waitForMessage(observerSocket, 'init');
+
+		const finalUpdatePromise = waitForRevision(observerSocket, 100, 10_000);
+		const latencyMetricsPromise = collectAckLatencyMetrics(editorSocket, 100, 10_000);
+		const startedAt = Date.now();
+		for (let revision = 1; revision <= 100; revision += 1) {
+			const clientTs = Date.now();
+			editorSocket.send(
+				JSON.stringify({
+					type: 'edit',
+					content: `edit-${revision}`,
+					clientSeq: revision,
+					clientTs,
+				}),
+			);
+			await sleepUntil(startedAt + revision * 10);
+		}
+
+		const [finalUpdate, latencyMetrics] = await Promise.all([finalUpdatePromise, latencyMetricsPromise]);
+		expect(finalUpdate).toMatchObject({
+			type: 'update',
+			content: 'edit-100',
+			from: editor.session.userId,
+			revision: 100,
+		});
+		expect(latencyMetrics).toMatchObject({ count: 100 });
+		expect(latencyMetrics.p50).toBeGreaterThanOrEqual(0);
+		expect(latencyMetrics.p95).toBeGreaterThanOrEqual(latencyMetrics.p50);
+		expect(latencyMetrics.p99).toBeGreaterThanOrEqual(latencyMetrics.p95);
+		console.info(JSON.stringify({ event: 'load_latency_ms', editsPerSecond: 100, ...latencyMetrics }));
+
+		const documentResponse = await SELF.fetch(`http://example.com/api/documents/${created.id}`, {
+			headers: { Cookie: editor.cookie },
+		});
+		expect(documentResponse.status).toBe(200);
+		const document = (await documentResponse.json()) as { content: string; revision: number };
+		expect(document).toMatchObject({ content: 'edit-100', revision: 100 });
+
+		editorSocket.close();
+		observerSocket.close();
+	}, 15_000);
 
 	it('sends the latest document title over WebSocket init', async () => {
 		const { cookie } = await createSession('Renamer');
@@ -432,6 +536,12 @@ async function openSocket(cookie: string, docId: string): Promise<WebSocket> {
 	return socket as WebSocket;
 }
 
+async function openSocketAndInit(cookie: string, docId: string): Promise<{ socket: WebSocket; init: { type: string; users: ActiveUser[] } }> {
+	const socket = await openSocket(cookie, docId);
+	const init = await waitForMessage<{ type: string; users: ActiveUser[] }>(socket, 'init');
+	return { socket, init };
+}
+
 async function waitForMessage<T extends { type: string }>(socket: WebSocket, type?: string): Promise<T> {
 	return new Promise((resolve, reject) => {
 		const timeout = setTimeout(() => {
@@ -484,4 +594,87 @@ async function waitForMergedContent(socket: WebSocket, left: string, right: stri
 		(message) => message.type === 'update' && message.revision === 2 && message.content.includes(left) && message.content.includes(right),
 		`merged content containing ${left} and ${right}`,
 	);
+}
+
+async function waitForRevision(
+	socket: WebSocket,
+	revision: number,
+	timeoutMs: number,
+): Promise<{ type: string; content: string; from: string; revision: number }> {
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			socket.removeEventListener('message', onMessage);
+			reject(new Error(`Timed out waiting for revision ${revision}`));
+		}, timeoutMs);
+
+		function onMessage(event: MessageEvent): void {
+			const parsed = JSON.parse(String(event.data)) as { type: string; content?: string; from?: string; revision?: number };
+			if (parsed.type !== 'update' || parsed.revision !== revision || typeof parsed.content !== 'string' || typeof parsed.from !== 'string') {
+				return;
+			}
+			clearTimeout(timeout);
+			socket.removeEventListener('message', onMessage);
+			resolve({ type: parsed.type, content: parsed.content, from: parsed.from, revision: parsed.revision });
+		}
+
+		socket.addEventListener('message', onMessage);
+	});
+}
+
+async function collectAckLatencyMetrics(socket: WebSocket, expectedCount: number, timeoutMs: number): Promise<LatencyMetrics> {
+	return new Promise((resolve, reject) => {
+		const latencies: number[] = [];
+		const timeout = setTimeout(() => {
+			socket.removeEventListener('message', onMessage);
+			reject(new Error(`Timed out waiting for ${expectedCount} ack messages; received ${latencies.length}`));
+		}, timeoutMs);
+
+		function onMessage(event: MessageEvent): void {
+			const parsed = JSON.parse(String(event.data)) as {
+				type: string;
+				clientSeq?: number;
+				clientTs?: number;
+				revision?: number;
+			};
+			if (parsed.type !== 'ack' || typeof parsed.clientSeq !== 'number' || typeof parsed.clientTs !== 'number') {
+				return;
+			}
+			latencies.push(Date.now() - parsed.clientTs);
+			if (latencies.length !== expectedCount) {
+				return;
+			}
+			clearTimeout(timeout);
+			socket.removeEventListener('message', onMessage);
+			resolve(calculateLatencyMetrics(latencies));
+		}
+
+		socket.addEventListener('message', onMessage);
+	});
+}
+
+function calculateLatencyMetrics(latencies: number[]): LatencyMetrics {
+	const sorted = [...latencies].sort((a, b) => a - b);
+	return {
+		count: sorted.length,
+		p50: percentile(sorted, 0.5),
+		p95: percentile(sorted, 0.95),
+		p99: percentile(sorted, 0.99),
+		max: sorted.at(-1) ?? 0,
+	};
+}
+
+function percentile(sortedValues: number[], percentileValue: number): number {
+	if (sortedValues.length === 0) {
+		return 0;
+	}
+	const index = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(sortedValues.length * percentileValue) - 1));
+	return sortedValues[index];
+}
+
+async function sleepUntil(timestamp: number): Promise<void> {
+	const delay = timestamp - Date.now();
+	if (delay <= 0) {
+		return;
+	}
+	await new Promise((resolve) => setTimeout(resolve, delay));
 }

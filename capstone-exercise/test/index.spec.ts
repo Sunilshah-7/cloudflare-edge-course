@@ -139,6 +139,90 @@ describe('collaborative notebook worker', () => {
 		socket.close();
 	});
 
+	it('broadcasts document edits from client A to client B', async () => {
+		const clientA = await createSession('Client A');
+		const clientB = await createSession('Client B');
+		const created = await createDocument(clientA.cookie, 'Two client edit');
+		await grantPermission(clientA.cookie, created.id, clientB.session.userId, 'editor');
+
+		const socketA = await openSocket(clientA.cookie, created.id);
+		await waitForMessage(socketA, 'init');
+		const socketB = await openSocket(clientB.cookie, created.id);
+		await waitForMessage(socketB, 'init');
+
+		const clientBUpdatePromise = waitForMessage<{ type: string; content: string; from: string; revision: number }>(
+			socketB,
+			'update',
+		);
+		socketA.send(JSON.stringify({ type: 'edit', content: 'Client A wrote this', clientSeq: 1, clientTs: Date.now() }));
+
+		const update = await clientBUpdatePromise;
+		expect(update).toMatchObject({
+			type: 'update',
+			content: 'Client A wrote this',
+			from: clientA.session.userId,
+			revision: 1,
+		});
+
+		socketA.close();
+		socketB.close();
+	});
+
+	it('merges simultaneous Yjs edits from two WebSocket clients', async () => {
+		const clientA = await createSession('Concurrent A');
+		const clientB = await createSession('Concurrent B');
+		const created = await createDocument(clientA.cookie, 'Concurrent edit');
+		await grantPermission(clientA.cookie, created.id, clientB.session.userId, 'editor');
+
+		const socketA = await openSocket(clientA.cookie, created.id);
+		await waitForMessage(socketA, 'init');
+		const socketB = await openSocket(clientB.cookie, created.id);
+		await waitForMessage(socketB, 'init');
+
+		const ydocA = new Y.Doc();
+		ydocA.getText('body').insert(0, 'Alpha');
+		const ydocB = new Y.Doc();
+		ydocB.getText('body').insert(0, 'Beta');
+
+		const mergedUpdateForA = waitForMergedContent(socketA, 'Alpha', 'Beta');
+		const mergedUpdateForB = waitForMergedContent(socketB, 'Alpha', 'Beta');
+
+		socketA.send(
+			JSON.stringify({
+				type: 'edit',
+				update: bytesToBase64(Y.encodeStateAsUpdate(ydocA)),
+				clientSeq: 1,
+				clientTs: Date.now(),
+			}),
+		);
+		socketB.send(
+			JSON.stringify({
+				type: 'edit',
+				update: bytesToBase64(Y.encodeStateAsUpdate(ydocB)),
+				clientSeq: 1,
+				clientTs: Date.now(),
+			}),
+		);
+
+		const [updateA, updateB] = await Promise.all([mergedUpdateForA, mergedUpdateForB]);
+		expect(updateA.revision).toBe(2);
+		expect(updateB.revision).toBe(2);
+		expect(updateA.content).toBe(updateB.content);
+		expect(updateA.content).toContain('Alpha');
+		expect(updateA.content).toContain('Beta');
+
+		const documentResponse = await SELF.fetch(`http://example.com/api/documents/${created.id}`, {
+			headers: { Cookie: clientA.cookie },
+		});
+		expect(documentResponse.status).toBe(200);
+		const document = (await documentResponse.json()) as { content: string; revision: number };
+		expect(document.revision).toBe(2);
+		expect(document.content).toBe(updateA.content);
+
+		socketA.close();
+		socketB.close();
+	});
+
 	it('sends the latest document title over WebSocket init', async () => {
 		const { cookie } = await createSession('Renamer');
 		const created = await createDocument(cookie, 'Original title');
@@ -392,4 +476,12 @@ async function waitForMessageWhere<T extends { type: string }>(
 
 		socket.addEventListener('message', onMessage);
 	});
+}
+
+async function waitForMergedContent(socket: WebSocket, left: string, right: string): Promise<{ type: string; content: string; revision: number }> {
+	return waitForMessageWhere<{ type: string; content: string; revision: number }>(
+		socket,
+		(message) => message.type === 'update' && message.revision === 2 && message.content.includes(left) && message.content.includes(right),
+		`merged content containing ${left} and ${right}`,
+	);
 }

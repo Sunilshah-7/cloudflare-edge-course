@@ -56,6 +56,30 @@ describe('collaborative notebook worker', () => {
 		});
 	});
 
+	it('preserves the same user id when refreshing a session', async () => {
+		const { cookie, session } = await createSession('Ada');
+		const created = await createDocument(cookie, 'Persistent notes');
+
+		const refreshResponse = await SELF.fetch('http://example.com/api/session', {
+			method: 'POST',
+			headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: 'Ada Lovelace' }),
+		});
+		expect(refreshResponse.status).toBe(200);
+		const refreshed = (await refreshResponse.json()) as SessionResponse;
+		const refreshedCookie = refreshResponse.headers.get('Set-Cookie')?.split(';')[0] ?? '';
+
+		expect(refreshed.userId).toBe(session.userId);
+		expect(refreshed.name).toBe('Ada Lovelace');
+
+		const documentResponse = await SELF.fetch(`http://example.com/api/documents/${created.id}`, {
+			headers: { Cookie: refreshedCookie },
+		});
+		expect(documentResponse.status).toBe(200);
+		const document = (await documentResponse.json()) as { id: string; role: string };
+		expect(document).toMatchObject({ id: created.id, role: 'owner' });
+	});
+
 	it('grants viewer access through a signed share link', async () => {
 		const owner = await createSession('Owner');
 		const viewer = await createSession('Viewer');

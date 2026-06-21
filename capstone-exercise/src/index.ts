@@ -44,7 +44,8 @@ async function handleRequest(request: Request, env: AppEnv): Promise<Response> {
 
 async function handleSession(request: Request, env: AppEnv): Promise<Response> {
 	const body = await readJson<{ name?: string }>(request);
-	const { session, cookie } = await createSession(body.name ?? 'Notebook User', env);
+	const currentSession = await getSession(request, env);
+	const { session, cookie } = await createSession(body.name ?? currentSession?.name ?? 'Notebook User', env, currentSession?.userId);
 	return Response.json(
 		{ userId: session.userId, name: session.name, expiresAt: session.exp },
 		{ headers: { 'Set-Cookie': cookie } },

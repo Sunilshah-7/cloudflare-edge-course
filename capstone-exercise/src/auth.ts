@@ -23,9 +23,9 @@ export async function getSession(request: Request, env: AppEnv): Promise<Session
 	return verifySession(token, env);
 }
 
-export async function createSession(name: string, env: AppEnv): Promise<{ session: Session; cookie: string }> {
+export async function createSession(name: string, env: AppEnv, userId = crypto.randomUUID()): Promise<{ session: Session; cookie: string }> {
 	const session: Session = {
-		userId: crypto.randomUUID(),
+		userId,
 		name: cleanName(name),
 		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
 	};

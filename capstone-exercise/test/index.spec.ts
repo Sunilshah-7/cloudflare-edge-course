@@ -76,6 +76,8 @@ describe('collaborative notebook worker', () => {
 			body: JSON.stringify({ token: share.token }),
 		});
 		expect(acceptResponse.status).toBe(200);
+		const accepted = (await acceptResponse.json()) as { docId: string; role: string };
+		expect(accepted).toMatchObject({ docId: created.id, role: 'viewer' });
 
 		const documentResponse = await SELF.fetch(`http://example.com/api/documents/${created.id}`, {
 			headers: { Cookie: viewer.cookie },

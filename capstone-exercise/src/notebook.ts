@@ -258,7 +258,7 @@ export class NotebookDocument extends DurableObject<AppEnv> {
 			input.role,
 		);
 		this.broadcastUsers();
-		return apiResult({ userId: input.targetUserId, role: input.role });
+		return apiResult({ docId: input.docId, userId: input.targetUserId, role: input.role });
 	}
 
 	async getRoleForUser(input: { docId: string; userId: string }): Promise<Role | null> {

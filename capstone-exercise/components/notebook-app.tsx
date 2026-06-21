@@ -109,6 +109,7 @@ export function NotebookApp() {
 	const editorRef = useRef<EditorView | null>(null);
 	const wsRef = useRef<WebSocket | null>(null);
 	const shouldReconnectRef = useRef(true);
+	const bootstrapStartedRef = useRef(false);
 	const ydocRef = useRef(new Y.Doc());
 	const ytextRef = useRef(ydocRef.current.getText('body'));
 	const applyingRemoteRef = useRef(false);
@@ -139,6 +140,7 @@ export function NotebookApp() {
 	const [shareRole, setShareRole] = useState<'viewer' | 'editor'>('viewer');
 	const [shareLink, setShareLink] = useState('');
 	const [shareGenerating, setShareGenerating] = useState(false);
+	const [bootstrapComplete, setBootstrapComplete] = useState(false);
 
 	const role = documentDetails?.role ?? null;
 	const canEdit = role === 'owner' || role === 'editor';
@@ -254,8 +256,8 @@ export function NotebookApp() {
 		[api, setEditorContent],
 	);
 
-	const ensureSession = useCallback(async () => {
-		const name = displayName || window.localStorage.getItem('notebook.name') || 'Notebook User';
+	const ensureSession = useCallback(async (nameOverride?: string) => {
+		const name = nameOverride ?? (displayName || window.localStorage.getItem('notebook.name') || 'Notebook User');
 		window.localStorage.setItem('notebook.name', name);
 		const nextSession = await api<Session>('/api/session', {
 			method: 'POST',
@@ -451,12 +453,6 @@ export function NotebookApp() {
 	);
 
 	useEffect(() => {
-		setDisplayName(window.localStorage.getItem('notebook.name') ?? 'Notebook User');
-		const params = new URL(window.location.href).searchParams;
-		setDocId(params.get('doc') ?? window.localStorage.getItem('notebook.docId'));
-	}, []);
-
-	useEffect(() => {
 		if (!editorHostRef.current || editorRef.current) {
 			return;
 		}
@@ -523,28 +519,43 @@ export function NotebookApp() {
 	}, [flushUpdates, setEditorContent]);
 
 	useEffect(() => {
+		if (bootstrapStartedRef.current) {
+			return;
+		}
+		bootstrapStartedRef.current = true;
+		let cancelled = false;
 		void (async () => {
-			if (session) {
-				return;
-			}
 			const params = new URL(window.location.href).searchParams;
 			const share = params.get('share');
-			await ensureSession();
+			const savedName = window.localStorage.getItem('notebook.name') ?? 'Notebook User';
+			setDisplayName(savedName);
+			await ensureSession(savedName);
+			if (cancelled) {
+				return;
+			}
 			if (share) {
-				await api('/api/share/accept', {
+				const accepted = await api<{ docId: string }>('/api/share/accept', {
 					method: 'POST',
 					body: JSON.stringify({ token: share }),
 				});
-				const payload = JSON.parse(atob(share.split('.')[0].replaceAll('-', '+').replaceAll('_', '/'))) as { docId: string };
-				setDocId(payload.docId);
-				window.localStorage.setItem('notebook.docId', payload.docId);
-				window.history.replaceState(null, '', `/?doc=${encodeURIComponent(payload.docId)}`);
+				if (cancelled) {
+					return;
+				}
+				setDocId(accepted.docId);
+				window.localStorage.setItem('notebook.docId', accepted.docId);
+				window.history.replaceState(null, '', `/?doc=${encodeURIComponent(accepted.docId)}`);
+			} else {
+				setDocId(params.get('doc') ?? window.localStorage.getItem('notebook.docId'));
 			}
+			setBootstrapComplete(true);
 		})().catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Startup failed'));
-	}, [api, ensureSession, session, showToast]);
+		return () => {
+			cancelled = true;
+		};
+	}, [api, ensureSession, showToast]);
 
 	useEffect(() => {
-		if (!session) {
+		if (!session || !bootstrapComplete) {
 			return;
 		}
 		void (async () => {
@@ -561,7 +572,7 @@ export function NotebookApp() {
 				await createDocument();
 			}
 		})().catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Document failed to load'));
-	}, [createDocument, docId, openDocument, session, showToast]);
+	}, [bootstrapComplete, createDocument, docId, openDocument, session, showToast]);
 
 	useEffect(() => {
 		if (!documentDetails) {

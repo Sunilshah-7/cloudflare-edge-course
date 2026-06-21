@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Collaborative Counter</title>
+  <style>
+    body {
+      max-width: 720px;
+      margin: 40px auto;
+      font-family: system-ui, sans-serif;
+      line-height: 1.4;
+    }
+
+    #counter {
+      font-size: 56px;
+      margin: 20px 0;
+    }
+
+    button {
+      min-width: 52px;
+      padding: 10px 20px;
+      margin: 5px 5px 5px 0;
+      font-size: 16px;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    #users,
+    #owner,
+    #status {
+      color: #5f6368;
+      margin: 10px 0;
+    }
+
+    #error {
+      min-height: 24px;
+      color: #b00020;
+      font-weight: 600;
+    }
+
+    ul {
+      padding-left: 20px;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Collaborative Counter</h1>
+  <div id="status">Connecting...</div>
+  <div id="owner">Owner: unknown</div>
+  <div id="counter">0</div>
+  <div id="users">Users: 0</div>
+  <ul id="user-list"></ul>
+  <button onclick="increment()">+</button>
+  <button onclick="decrement()">-</button>
+  <button id="reset" onclick="reset()" disabled>Reset</button>
+  <div id="error"></div>
+
+  <h2>Last 10 Operations</h2>
+  <ul id="history"></ul>
+
+  <script>
+    const counterId = 'shared';
+    const clientId = getClientId();
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const params = new URLSearchParams({ id: counterId, clientId });
+    const ws = new WebSocket(`${protocol}//${location.host}/counter?${params}`);
+    let ownerId = null;
+
+    ws.onopen = () => {
+      document.getElementById('status').textContent = `Connected as ${clientId}`;
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+
+      if (msg.type === 'error') {
+        showError(msg.message);
+        return;
+      }
+
+      if (msg.type === 'init') {
+        ownerId = msg.ownerId;
+        renderOwner();
+      }
+
+      if (msg.type === 'init' || msg.type === 'update') {
+        document.getElementById('counter').textContent = msg.value;
+      }
+
+      if (msg.type === 'init' || msg.type === 'users') {
+        renderUsers(msg.users || []);
+      }
+
+      if (msg.type === 'init' || msg.type === 'update') {
+        renderHistory(msg.history || []);
+      }
+    };
+
+    ws.onerror = (event) => {
+      console.error('WebSocket error:', event);
+      showError('WebSocket error. Check the Worker console.');
+    };
+
+    ws.onclose = () => {
+      document.getElementById('status').textContent = 'Disconnected';
+      document.getElementById('reset').disabled = true;
+    };
+
+    function getClientId() {
+      const existing = localStorage.getItem('collab-counter-client-id');
+      if (existing) {
+        return existing;
+      }
+
+      const next = 'client-' + Math.random().toString(36).substring(2, 11);
+      localStorage.setItem('collab-counter-client-id', next);
+      return next;
+    }
+
+    function renderOwner() {
+      const isOwner = ownerId === clientId;
+      document.getElementById('owner').textContent = `Owner: ${ownerId}${isOwner ? ' (you)' : ''}`;
+      document.getElementById('reset').disabled = !isOwner;
+    }
+
+    function renderUsers(users) {
+      document.getElementById('users').textContent = `Users: ${users.length}`;
+      document.getElementById('user-list').replaceChildren(
+        ...users.map((user) => {
+          const item = document.createElement('li');
+          item.textContent = user === clientId ? `${user} (you)` : user;
+          return item;
+        }),
+      );
+    }
+
+    function renderHistory(history) {
+      const formatter = new Intl.DateTimeFormat(undefined, {
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      document.getElementById('history').replaceChildren(
+        ...history.slice().reverse().map((operation) => {
+          const item = document.createElement('li');
+          const actor = operation.clientId === clientId ? `${operation.clientId} (you)` : operation.clientId;
+          item.textContent = `${formatter.format(operation.timestamp)} - ${actor} ${operation.type} -> ${operation.value}`;
+          return item;
+        }),
+      );
+    }
+
+    function showError(message) {
+      document.getElementById('error').textContent = message;
+      window.setTimeout(() => {
+        document.getElementById('error').textContent = '';
+      }, 4000);
+    }
+
+    function increment() {
+      ws.send(JSON.stringify({ type: 'increment', clientId }));
+    }
+
+    function decrement() {
+      ws.send(JSON.stringify({ type: 'decrement', clientId }));
+    }
+
+    function reset() {
+      ws.send(JSON.stringify({ type: 'reset', clientId }));
+    }
+  </script>
+</body>
+</html>

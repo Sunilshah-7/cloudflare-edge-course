@@ -147,6 +147,7 @@ export function NotebookApp() {
 	const role = documentDetails?.role ?? null;
 	const canEdit = role === 'owner' || role === 'editor';
 	const loadedDocumentId = documentDetails?.id ?? null;
+	const currentUserId = session?.userId ?? documentDetails?.ownerId ?? '';
 	const p95Latency = useMemo(() => {
 		if (latencySamples.length === 0) {
 			return null;
@@ -637,50 +638,121 @@ export function NotebookApp() {
 			<header className="topbar">
 				<div className="identity">
 					<div className="mark">CN</div>
-					<div>
+					<div className="identityText">
 						<h1>Collaborative Notebook</h1>
-						<p>{documentDetails ? `${documentDetails.id} owned by ${documentDetails.ownerId}` : 'No document loaded'}</p>
+						<p title={documentDetails ? `${documentDetails.id} owned by ${documentDetails.ownerId}` : undefined}>
+							{documentDetails ? `${documentDetails.id} owned by ${documentDetails.ownerId}` : 'No document loaded'}
+						</p>
 					</div>
 				</div>
 				<div className="toolbar">
-					<input aria-label="Display name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-					<button type="button" onClick={() => void ensureSession()}>
-						Sign in
+					<label className="userPill">
+						<span aria-hidden="true">U</span>
+						<input aria-label="Display name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+					</label>
+					<button type="button" className="outlineButton" onClick={() => void createDocument()}>
+						<span aria-hidden="true">+</span>
+						<span>New</span>
 					</button>
-					<button type="button" onClick={() => void createDocument()}>
-						New
-					</button>
-					<button type="button" disabled={role !== 'owner'} onClick={openShareModal}>
+					<button type="button" className="outlineButton" disabled={role !== 'owner'} onClick={openShareModal}>
 						Share
 					</button>
 				</div>
 			</header>
 
 			<section className="statusbar" aria-live="polite">
-				<div className={`status ${connectionState === 'default' ? '' : connectionState}`}>{connection}</div>
-				<div>Latency: {p95Latency === null ? 'n/a' : `${p95Latency}ms p95`}</div>
-				<div>Revision: {revision}</div>
-				<div>Role: {role ?? 'none'}</div>
+				<div className={`statusItem status ${connectionState === 'default' ? '' : connectionState}`}>
+					<span className="statusDot" aria-hidden="true" />
+					<span>{connection}</span>
+				</div>
+				<div className="statusDivider" aria-hidden="true" />
+				<div className="statusItem">
+					<span>Latency</span>
+					<code>{p95Latency === null ? 'n/a' : `${p95Latency}ms p95`}</code>
+				</div>
+				<div className="statusDivider" aria-hidden="true" />
+				<div className="statusItem">
+					<span>Revision</span>
+					<code>{revision}</code>
+				</div>
+				<div className="statusDivider" aria-hidden="true" />
+				<div className="statusItem">
+					<span>Role</span>
+					<strong>{role ?? 'none'}</strong>
+				</div>
 			</section>
 
 			<section className="workspace">
-				<aside className="side panel">
+				<aside className="panel peoplePanel">
 					<PanelHeader title="Collaborators" />
-					<div className="list">
+					<div className="collaboratorArea">
 						{users.length === 0 ? (
-							<p className="empty">No active collaborators.</p>
+							<div className="emptyDashed">
+								<span aria-hidden="true">U</span>
+								<p>No one active</p>
+							</div>
 						) : (
-							users.map((user) => (
-								<div className="listItem" key={user.id}>
-									<strong>{user.name}</strong>
-									<span>{`${user.role}${user.pos === null ? '' : ` at ${user.pos}`}`}</span>
-									<code>{user.id}</code>
-								</div>
-							))
+							<div className="avatarStack" aria-label="Active collaborators">
+								{users.map((user, index) => (
+									<div className="collaboratorAvatar" key={user.id} title={`${user.name} (${user.role}) ${user.id}`}>
+										{initials(user.name) || String(index + 1)}
+									</div>
+								))}
+							</div>
 						)}
 					</div>
 
-					<PanelHeader title="Analytics" actionLabel="Refresh" onAction={() => void refreshAnalytics()} />
+					<div className="panelDivider" />
+
+					<PanelHeader title="Share access" />
+					<div className="permissionForm">
+						<input aria-label="User ID" placeholder="User ID" value={grantUserId} onChange={(event) => setGrantUserId(event.target.value)} />
+						<select aria-label="Role" value={grantRole} onChange={(event) => setGrantRole(event.target.value as 'viewer' | 'editor')}>
+							<option value="viewer">Viewer</option>
+							<option value="editor">Editor</option>
+						</select>
+						<button type="button" className="outlineButton" disabled={role !== 'owner'} onClick={() => void grantPermission()}>
+							Grant
+						</button>
+					</div>
+
+					<div className="panelDivider" />
+
+					<div className="currentUser">
+						<div className="currentAvatar" aria-hidden="true">
+							{initials(displayName) || 'U'}
+						</div>
+						<div className="currentIdentity">
+							<strong>{displayName || 'Notebook User'}</strong>
+							<span>{role ?? 'not connected'}</span>
+							<code title={currentUserId}>{currentUserId || 'No user id'}</code>
+						</div>
+					</div>
+
+					{role === 'owner' && permissions.length > 0 ? (
+						<div className="accessList" aria-label="Permission grants">
+							{permissions.map((permission) => (
+								<div className="accessGrant" key={permission.user_id}>
+									<span>{permission.role}</span>
+									<code title={permission.user_id}>{permission.user_id}</code>
+								</div>
+							))}
+						</div>
+					) : null}
+				</aside>
+
+				<section className="editorColumn">
+					<div className="titleRow">
+						<input aria-label="Document title" value={title} disabled={!canEdit} onChange={(event) => setTitle(event.target.value)} />
+						<button type="button" className="saveButton" disabled={!canEdit} onClick={() => void saveTitle()}>
+							Save
+						</button>
+					</div>
+					<div ref={editorHostRef} className="editor" />
+				</section>
+
+				<aside className="panel activityPanel">
+					<PanelHeader title="Analytics" actionLabel="Refresh analytics" iconAction onAction={() => void refreshAnalytics()} />
 					<dl className="metrics">
 						<dt>Edits today</dt>
 						<dd>{analytics?.edit_count ?? 0}</dd>
@@ -693,30 +765,21 @@ export function NotebookApp() {
 						<dt>Bytes out</dt>
 						<dd>{analytics?.bytes_out ?? 0}</dd>
 					</dl>
-				</aside>
 
-				<section className="editorColumn">
-					<div className="titleRow">
-						<input aria-label="Document title" value={title} disabled={!canEdit} onChange={(event) => setTitle(event.target.value)} />
-						<button type="button" disabled={!canEdit} onClick={() => void saveTitle()}>
-							Save
-						</button>
-					</div>
-					<div ref={editorHostRef} className="editor" />
-				</section>
+					<div className="panelDivider" />
 
-				<aside className="side panel">
-					<PanelHeader title="History" actionLabel="Refresh" onAction={() => void refreshHistory()} />
-					<div className="list">
+					<PanelHeader title="History" actionLabel="Refresh history" iconAction onAction={() => void refreshHistory()} />
+					<div className="historyList">
 						{history.length === 0 ? (
-							<p className="empty">No edits yet.</p>
+							<p className="empty">No edits yet</p>
 						) : (
 							history.map((change) => (
-								<div className="listItem" key={change.id}>
-									<strong>Revision {change.id}</strong>
-									<span>
-										{change.user_id} at {new Date(change.timestamp).toLocaleString()}
-									</span>
+								<div className="historyItem" key={change.id}>
+									<div>
+										<strong>Revision {change.id}</strong>
+										<time dateTime={change.timestamp}>{new Date(change.timestamp).toLocaleString()}</time>
+										<code title={change.user_id}>{change.user_id}</code>
+									</div>
 									<div className="historyActions">
 										<button type="button" disabled={!canEdit} onClick={() => void revertChange(change.id, 'old')}>
 											Revert old
@@ -725,30 +788,6 @@ export function NotebookApp() {
 											Revert new
 										</button>
 									</div>
-								</div>
-							))
-						)}
-					</div>
-
-					<PanelHeader title="Permissions" />
-					<div className="permissionForm">
-						<input aria-label="User ID" placeholder="User ID" value={grantUserId} onChange={(event) => setGrantUserId(event.target.value)} />
-						<select aria-label="Role" value={grantRole} onChange={(event) => setGrantRole(event.target.value as 'viewer' | 'editor')}>
-							<option value="viewer">Viewer</option>
-							<option value="editor">Editor</option>
-						</select>
-						<button type="button" disabled={role !== 'owner'} onClick={() => void grantPermission()}>
-							Grant
-						</button>
-					</div>
-					<div className="list">
-						{role !== 'owner' ? (
-							<p className="empty">Owner access required.</p>
-						) : (
-							permissions.map((permission) => (
-								<div className="listItem" key={permission.user_id}>
-									<strong>{permission.role}</strong>
-									<code>{permission.user_id}</code>
 								</div>
 							))
 						)}
@@ -852,13 +891,23 @@ function ShareModal({
 	);
 }
 
-function PanelHeader({ title, actionLabel, onAction }: { title: string; actionLabel?: string; onAction?: () => void }) {
+function PanelHeader({
+	title,
+	actionLabel,
+	iconAction = false,
+	onAction,
+}: {
+	title: string;
+	actionLabel?: string;
+	iconAction?: boolean;
+	onAction?: () => void;
+}) {
 	return (
 		<div className="sectionHeader">
 			<h2>{title}</h2>
 			{actionLabel ? (
-				<button type="button" onClick={onAction}>
-					{actionLabel}
+				<button type="button" className={iconAction ? 'iconButton' : undefined} aria-label={iconAction ? actionLabel : undefined} onClick={onAction}>
+					{iconAction ? <span aria-hidden="true">↻</span> : actionLabel}
 				</button>
 			) : null}
 		</div>

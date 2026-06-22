@@ -1,0 +1,958 @@
+'use client';
+
+import { Compartment, EditorState, StateEffect, StateField } from '@codemirror/state';
+import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view';
+import { basicSetup } from 'codemirror';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as Y from 'yjs';
+
+type Role = 'owner' | 'editor' | 'viewer';
+
+type Selection = {
+	anchor: number;
+	head: number;
+};
+
+type ActiveUser = {
+	id: string;
+	name: string;
+	role: Role;
+	pos: number | null;
+	selection: Selection | null;
+};
+
+type Session = {
+	userId: string;
+	name: string;
+	expiresAt: number;
+};
+
+type DocumentDetails = {
+	id: string;
+	title: string;
+	ownerId: string;
+	content: string;
+	revision: number;
+	role: Role;
+	activeUsers: ActiveUser[];
+};
+
+type Change = {
+	id: number;
+	doc_id: string;
+	user_id: string;
+	old_content: string | null;
+	new_content: string | null;
+	timestamp: string;
+};
+
+type Analytics = {
+	edit_count: number;
+	connection_count: number;
+	max_active_users: number;
+	bytes_in: number;
+	bytes_out: number;
+};
+
+type ServerMessage =
+	| { type: 'init'; title: string; content: string; snapshot: string; revision: number; users: ActiveUser[] }
+	| { type: 'update'; content: string; update: string; from: string; revision: number }
+	| { type: 'cursor'; userId: string; pos: number; selection: Selection | null }
+	| { type: 'users'; active: ActiveUser[] }
+	| { type: 'title'; title: string; from: string }
+	| { type: 'ack'; clientSeq?: number; revision: number; serverTs: number; clientTs?: number }
+	| { type: 'pong'; serverTs: number; clientTs?: number }
+	| { type: 'error'; code: string; message: string };
+
+const cursorEffect = StateEffect.define<ActiveUser[]>();
+const editableCompartment = new Compartment();
+
+class CursorWidget extends WidgetType {
+	constructor(private readonly user: ActiveUser) {
+		super();
+	}
+
+	toDOM(): HTMLElement {
+		const cursor = document.createElement('span');
+		cursor.className = 'remoteCursor';
+		cursor.dataset.name = this.user.name;
+		return cursor;
+	}
+}
+
+const cursorField = StateField.define<DecorationSet>({
+	create() {
+		return Decoration.none;
+	},
+	update(value, transaction) {
+		let next = value.map(transaction.changes);
+		for (const effect of transaction.effects) {
+			if (effect.is(cursorEffect)) {
+				next = Decoration.set(
+					effect.value
+						.filter((user) => typeof user.pos === 'number')
+						.map((user) =>
+							Decoration.widget({
+								widget: new CursorWidget(user),
+								side: 1,
+							}).range(Math.min(user.pos ?? 0, transaction.state.doc.length)),
+						),
+					true,
+				);
+			}
+		}
+		return next;
+	},
+	provide: (field) => EditorView.decorations.from(field),
+});
+
+export function NotebookApp() {
+	const editorHostRef = useRef<HTMLDivElement | null>(null);
+	const editorRef = useRef<EditorView | null>(null);
+	const wsRef = useRef<WebSocket | null>(null);
+	const shouldReconnectRef = useRef(true);
+	const bootstrapStartedRef = useRef(false);
+	const ydocRef = useRef(new Y.Doc());
+	const ytextRef = useRef(ydocRef.current.getText('body'));
+	const applyingRemoteRef = useRef(false);
+	const roleRef = useRef<Role | null>(null);
+	const pendingUpdatesRef = useRef<string[]>([]);
+	const flushTimerRef = useRef<number | null>(null);
+	const reconnectTimerRef = useRef<number | null>(null);
+	const clientSeqRef = useRef(0);
+	const shareRequestIdRef = useRef(0);
+
+	const [session, setSession] = useState<Session | null>(null);
+	const [displayName, setDisplayName] = useState('Notebook User');
+	const [docId, setDocId] = useState<string | null>(null);
+	const [documentDetails, setDocumentDetails] = useState<DocumentDetails | null>(null);
+	const [connection, setConnection] = useState('Disconnected');
+	const [connectionState, setConnectionState] = useState<'default' | 'connected' | 'error'>('default');
+	const [revision, setRevision] = useState(0);
+	const [users, setUsers] = useState<ActiveUser[]>([]);
+	const [history, setHistory] = useState<Change[]>([]);
+	const [analytics, setAnalytics] = useState<Analytics | null>(null);
+	const [permissions, setPermissions] = useState<Array<{ user_id: string; role: Role }>>([]);
+	const [grantUserId, setGrantUserId] = useState('');
+	const [grantRole, setGrantRole] = useState<'viewer' | 'editor'>('viewer');
+	const [title, setTitle] = useState('Untitled notebook');
+	const [toast, setToast] = useState<string | null>(null);
+	const [latencySamples, setLatencySamples] = useState<number[]>([]);
+	const [shareModalOpen, setShareModalOpen] = useState(false);
+	const [shareRole, setShareRole] = useState<'viewer' | 'editor'>('viewer');
+	const [shareLink, setShareLink] = useState('');
+	const [shareGenerating, setShareGenerating] = useState(false);
+	const [bootstrapComplete, setBootstrapComplete] = useState(false);
+
+	const role = documentDetails?.role ?? null;
+	const canEdit = role === 'owner' || role === 'editor';
+	const loadedDocumentId = documentDetails?.id ?? null;
+	const currentUserId = session?.userId ?? documentDetails?.ownerId ?? '';
+	const p95Latency = useMemo(() => {
+		if (latencySamples.length === 0) {
+			return null;
+		}
+		const sorted = [...latencySamples].sort((a, b) => a - b);
+		return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)];
+	}, [latencySamples]);
+
+	useEffect(() => {
+		roleRef.current = role;
+	}, [role]);
+
+	const showToast = useCallback((message: string) => {
+		setToast(message);
+		window.setTimeout(() => setToast(null), 3000);
+	}, []);
+
+	const api = useCallback(async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
+		const response = await fetch(path, {
+			...init,
+			headers: {
+				'Content-Type': 'application/json',
+				...(init.headers ?? {}),
+			},
+		});
+		if (!response.ok) {
+			const body = (await response.json().catch(() => ({ error: response.statusText }))) as { error?: string };
+			throw new Error(body.error ?? response.statusText);
+		}
+		return (await response.json()) as T;
+	}, []);
+
+	const setEditorContent = useCallback((content: string) => {
+		const editor = editorRef.current;
+		if (!editor || editor.state.doc.toString() === content) {
+			return;
+		}
+		applyingRemoteRef.current = true;
+		editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: content } });
+		applyingRemoteRef.current = false;
+	}, []);
+
+	const flushUpdates = useCallback(() => {
+		flushTimerRef.current = null;
+		const ws = wsRef.current;
+		if (!ws || ws.readyState !== WebSocket.OPEN || pendingUpdatesRef.current.length === 0) {
+			return;
+		}
+		const messages = pendingUpdatesRef.current.splice(0).map((update) => ({
+			type: 'edit',
+			update,
+			clientSeq: ++clientSeqRef.current,
+			clientTs: Date.now(),
+		}));
+		ws.send(JSON.stringify(messages.length === 1 ? messages[0] : { messages, timestamp: Date.now() }));
+	}, []);
+
+	const sendCursor = useCallback(() => {
+		const ws = wsRef.current;
+		const editor = editorRef.current;
+		if (!ws || !editor || ws.readyState !== WebSocket.OPEN) {
+			return;
+		}
+		const selection = editor.state.selection.main;
+		ws.send(
+			JSON.stringify({
+				type: 'cursor',
+				pos: selection.head,
+				selection: { anchor: selection.anchor, head: selection.head },
+			}),
+		);
+	}, []);
+
+	const refreshHistory = useCallback(async () => {
+		if (!docId) {
+			return;
+		}
+		const data = await api<{ changes: Change[] }>(`/api/documents/${encodeURIComponent(docId)}/history`);
+		setHistory(data.changes);
+	}, [api, docId]);
+
+	const refreshAnalytics = useCallback(async () => {
+		if (!docId) {
+			return;
+		}
+		const data = await api<{ analytics: Analytics }>(`/api/documents/${encodeURIComponent(docId)}/analytics`);
+		setAnalytics(data.analytics);
+	}, [api, docId]);
+
+	const refreshPermissions = useCallback(async () => {
+		if (!docId || role !== 'owner') {
+			setPermissions([]);
+			return;
+		}
+		const data = await api<{ permissions: Array<{ user_id: string; role: Role }> }>(
+			`/api/documents/${encodeURIComponent(docId)}/permissions`,
+		);
+		setPermissions(data.permissions);
+	}, [api, docId, role]);
+
+	const openDocument = useCallback(
+		async (id: string) => {
+			const details = await api<DocumentDetails>(`/api/documents/${encodeURIComponent(id)}`);
+			setDocumentDetails(details);
+			setTitle(details.title);
+			setRevision(details.revision);
+			setUsers(details.activeUsers);
+			setEditorContent(details.content);
+		},
+		[api, setEditorContent],
+	);
+
+	const ensureSession = useCallback(async (nameOverride?: string) => {
+		const name = nameOverride ?? (displayName || window.localStorage.getItem('notebook.name') || 'Notebook User');
+		window.localStorage.setItem('notebook.name', name);
+		const nextSession = await api<Session>('/api/session', {
+			method: 'POST',
+			body: JSON.stringify({ name }),
+		});
+		setSession(nextSession);
+		setDisplayName(nextSession.name);
+		showToast(`Signed in as ${nextSession.name}`);
+		return nextSession;
+	}, [api, displayName, showToast]);
+
+	const createDocument = useCallback(async () => {
+		const created = await api<{ id: string; title: string }>('/api/documents', {
+			method: 'POST',
+			body: JSON.stringify({ title: 'Untitled notebook' }),
+		});
+		setDocId(created.id);
+		window.localStorage.setItem('notebook.docId', created.id);
+		window.history.replaceState(null, '', `/?doc=${encodeURIComponent(created.id)}`);
+		await openDocument(created.id);
+	}, [api, openDocument]);
+
+	const connectWebSocket = useCallback(() => {
+		if (!docId) {
+			return;
+		}
+		if (wsRef.current) {
+			shouldReconnectRef.current = false;
+			const previous = wsRef.current;
+			wsRef.current = null;
+			previous.close(1000, 'reconnecting');
+		}
+		if (reconnectTimerRef.current) {
+			window.clearTimeout(reconnectTimerRef.current);
+			reconnectTimerRef.current = null;
+		}
+		shouldReconnectRef.current = true;
+
+		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+		const socket = new WebSocket(`${protocol}//${window.location.host}/edit/${encodeURIComponent(docId)}`);
+		wsRef.current = socket;
+		setConnection('Connecting');
+		setConnectionState('default');
+
+		socket.addEventListener('open', () => {
+			setConnection('Connected');
+			setConnectionState('connected');
+			socket.send(JSON.stringify({ type: 'ping', clientTs: Date.now() }));
+		});
+
+		socket.addEventListener('message', (event) => {
+			const message = JSON.parse(String(event.data)) as ServerMessage;
+			if (message.type === 'init') {
+				setTitle(message.title);
+				setDocumentDetails((current) =>
+					current && current.title !== message.title ? { ...current, title: message.title } : current,
+				);
+				setRevision(message.revision);
+				setUsers(message.users.filter((user) => user.id !== session?.userId));
+				applyingRemoteRef.current = true;
+				Y.applyUpdate(ydocRef.current, base64ToBytes(message.snapshot), 'server');
+				setEditorContent(message.content);
+				applyingRemoteRef.current = false;
+			} else if (message.type === 'update') {
+				setRevision(message.revision);
+				applyingRemoteRef.current = true;
+				Y.applyUpdate(ydocRef.current, base64ToBytes(message.update), 'server');
+				setEditorContent(message.content);
+				applyingRemoteRef.current = false;
+			} else if (message.type === 'cursor') {
+				setUsers((current) =>
+					current.map((user) =>
+						user.id === message.userId ? { ...user, pos: message.pos, selection: message.selection } : user,
+					),
+				);
+			} else if (message.type === 'users') {
+				setUsers(message.active.filter((user) => user.id !== session?.userId));
+			} else if (message.type === 'title') {
+				setTitle(message.title);
+				setDocumentDetails((current) =>
+					current && current.title !== message.title ? { ...current, title: message.title } : current,
+				);
+			} else if (message.type === 'ack' || message.type === 'pong') {
+				if (message.clientTs) {
+					const clientTs = message.clientTs;
+					setLatencySamples((current) => [...current, Date.now() - clientTs].slice(-20));
+				}
+				if ('revision' in message && message.revision) {
+					setRevision(message.revision);
+				}
+			} else if (message.type === 'error') {
+				showToast(message.message);
+			}
+		});
+
+		socket.addEventListener('close', () => {
+			if (wsRef.current !== socket || !shouldReconnectRef.current) {
+				return;
+			}
+			setConnection('Disconnected');
+			setConnectionState('default');
+			reconnectTimerRef.current = window.setTimeout(connectWebSocket, 1000 + Math.floor(Math.random() * 1000));
+		});
+
+		socket.addEventListener('error', () => {
+			setConnection('Connection error');
+			setConnectionState('error');
+		});
+	}, [docId, session?.userId, setEditorContent, showToast]);
+
+	const persistTitle = useCallback(async () => {
+		if (!docId) {
+			return null;
+		}
+		const nextTitle = title.trim() || 'Untitled notebook';
+		const data = await api<{ title: string }>(`/api/documents/${encodeURIComponent(docId)}`, {
+			method: 'PATCH',
+			body: JSON.stringify({ title: nextTitle }),
+		});
+		setDocumentDetails((current) => (current ? { ...current, title: data.title } : current));
+		setTitle(data.title);
+		return data.title;
+	}, [api, docId, title]);
+
+	const saveTitle = useCallback(async () => {
+		const savedTitle = await persistTitle();
+		if (!savedTitle) {
+			return;
+		}
+		showToast('Title saved');
+	}, [persistTitle, showToast]);
+
+	const revertChange = useCallback(
+		async (changeId: number, target: 'old' | 'new') => {
+			if (!docId) {
+				return;
+			}
+			const data = await api<{ content: string; revision: number }>(`/api/documents/${encodeURIComponent(docId)}/revert`, {
+				method: 'POST',
+				body: JSON.stringify({ changeId, target }),
+			});
+			setEditorContent(data.content);
+			setRevision(data.revision);
+			await refreshHistory();
+		},
+		[api, docId, refreshHistory, setEditorContent],
+	);
+
+	const grantPermission = useCallback(async () => {
+		if (!docId || !grantUserId.trim()) {
+			showToast('Enter a user ID first');
+			return;
+		}
+		await api(`/api/documents/${encodeURIComponent(docId)}/permissions/${encodeURIComponent(grantUserId.trim())}`, {
+			method: 'PUT',
+			body: JSON.stringify({ role: grantRole }),
+		});
+		setGrantUserId('');
+		await refreshPermissions();
+	}, [api, docId, grantRole, grantUserId, refreshPermissions, showToast]);
+
+	const generateShareLink = useCallback(
+		async (nextRole: 'viewer' | 'editor') => {
+			if (!docId) {
+				return;
+			}
+			const requestId = shareRequestIdRef.current + 1;
+			shareRequestIdRef.current = requestId;
+			setShareGenerating(true);
+			try {
+				const data = await api<{ url: string }>(`/api/documents/${encodeURIComponent(docId)}/share`, {
+					method: 'POST',
+					body: JSON.stringify({ role: nextRole }),
+				});
+				if (shareRequestIdRef.current === requestId) {
+					setShareLink(new URL(data.url, window.location.href).href);
+				}
+			} finally {
+				if (shareRequestIdRef.current === requestId) {
+					setShareGenerating(false);
+				}
+			}
+		},
+		[api, docId],
+	);
+
+	const openShareModal = useCallback(() => {
+		if (!docId) {
+			return;
+		}
+		setShareRole('viewer');
+		setShareLink('');
+		setShareModalOpen(true);
+		void (async () => {
+			if (canEdit) {
+				await persistTitle();
+			}
+			await generateShareLink('viewer');
+		})().catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Could not create share link'));
+	}, [canEdit, docId, generateShareLink, persistTitle, showToast]);
+
+	const copyShareLink = useCallback(async () => {
+		if (!shareLink) {
+			return;
+		}
+		await navigator.clipboard.writeText(shareLink);
+		showToast('Share link copied');
+	}, [shareLink, showToast]);
+
+	const updateShareRole = useCallback(
+		(nextRole: 'viewer' | 'editor') => {
+			setShareRole(nextRole);
+			setShareLink('');
+			void generateShareLink(nextRole).catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Could not create share link'));
+		},
+		[generateShareLink, showToast],
+	);
+
+	useEffect(() => {
+		if (!editorHostRef.current || editorRef.current) {
+			return;
+		}
+
+		const editor = new EditorView({
+			doc: '',
+			parent: editorHostRef.current,
+			extensions: [
+					basicSetup,
+					cursorField,
+					editableCompartment.of(editabilityExtensions(false)),
+					EditorView.lineWrapping,
+					EditorView.updateListener.of((update) => {
+					if (!update.docChanged || applyingRemoteRef.current || !(roleRef.current === 'owner' || roleRef.current === 'editor')) {
+						return;
+					}
+					const content = update.state.doc.toString();
+					ydocRef.current.transact(() => {
+						const text = ytextRef.current;
+						text.delete(0, text.length);
+						text.insert(0, content);
+					}, 'local');
+					sendCursor();
+				}),
+			],
+		});
+
+		editorRef.current = editor;
+		const onKeyup = throttle(sendCursor, 100);
+		const onMouseup = throttle(sendCursor, 100);
+		editor.dom.addEventListener('keyup', onKeyup);
+		editor.dom.addEventListener('mouseup', onMouseup);
+
+		return () => {
+			editor.dom.removeEventListener('keyup', onKeyup);
+			editor.dom.removeEventListener('mouseup', onMouseup);
+			editor.destroy();
+			editorRef.current = null;
+		};
+		}, [sendCursor]);
+
+	useEffect(() => {
+		editorRef.current?.dispatch({
+			effects: editableCompartment.reconfigure(editabilityExtensions(canEdit)),
+		});
+	}, [canEdit]);
+
+	useEffect(() => {
+		const ydoc = ydocRef.current;
+		const text = ytextRef.current;
+		const onUpdate = (update: Uint8Array, origin: unknown) => {
+			if (origin !== 'local') {
+				return;
+			}
+			pendingUpdatesRef.current.push(bytesToBase64(update));
+			if (!flushTimerRef.current) {
+				flushTimerRef.current = window.setTimeout(flushUpdates, 75);
+			}
+		};
+		const onTextChange = () => {
+			if (applyingRemoteRef.current) {
+				setEditorContent(text.toString());
+			}
+		};
+		ydoc.on('update', onUpdate);
+		text.observe(onTextChange);
+		return () => {
+			ydoc.off('update', onUpdate);
+			text.unobserve(onTextChange);
+		};
+	}, [flushUpdates, setEditorContent]);
+
+	useEffect(() => {
+		if (bootstrapStartedRef.current) {
+			return;
+		}
+		bootstrapStartedRef.current = true;
+		let cancelled = false;
+		void (async () => {
+			const params = new URL(window.location.href).searchParams;
+			const share = params.get('share');
+			const savedName = window.localStorage.getItem('notebook.name') ?? 'Notebook User';
+			setDisplayName(savedName);
+			await ensureSession(savedName);
+			if (cancelled) {
+				return;
+			}
+			if (share) {
+				const accepted = await api<{ docId: string }>('/api/share/accept', {
+					method: 'POST',
+					body: JSON.stringify({ token: share }),
+				});
+				if (cancelled) {
+					return;
+				}
+				setDocId(accepted.docId);
+				window.localStorage.setItem('notebook.docId', accepted.docId);
+				window.history.replaceState(null, '', `/?doc=${encodeURIComponent(accepted.docId)}`);
+			} else {
+				setDocId(params.get('doc') ?? window.localStorage.getItem('notebook.docId'));
+			}
+			setBootstrapComplete(true);
+		})().catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Startup failed'));
+		return () => {
+			cancelled = true;
+		};
+	}, [api, ensureSession, showToast]);
+
+	useEffect(() => {
+		if (!session || !bootstrapComplete) {
+			return;
+		}
+		void (async () => {
+			if (docId) {
+				try {
+					await openDocument(docId);
+				} catch (error) {
+					window.localStorage.removeItem('notebook.docId');
+					setDocId(null);
+					await createDocument();
+					showToast(error instanceof Error ? `Started a new document because the saved one could not be opened: ${error.message}` : 'Started a new document.');
+				}
+			} else {
+				await createDocument();
+			}
+		})().catch((error: unknown) => showToast(error instanceof Error ? error.message : 'Document failed to load'));
+	}, [bootstrapComplete, createDocument, docId, openDocument, session, showToast]);
+
+	useEffect(() => {
+		if (!loadedDocumentId) {
+			return;
+		}
+		connectWebSocket();
+		void refreshHistory();
+		void refreshAnalytics();
+		void refreshPermissions();
+		return () => {
+			shouldReconnectRef.current = false;
+			const socket = wsRef.current;
+			wsRef.current = null;
+			socket?.close(1000, 'component cleanup');
+			if (reconnectTimerRef.current) {
+				window.clearTimeout(reconnectTimerRef.current);
+				reconnectTimerRef.current = null;
+			}
+		};
+	}, [connectWebSocket, loadedDocumentId, refreshAnalytics, refreshHistory, refreshPermissions]);
+
+	useEffect(() => {
+		editorRef.current?.dispatch({ effects: cursorEffect.of(users) });
+	}, [users]);
+
+	return (
+		<main className="shell">
+			<header className="topbar">
+				<div className="identity">
+					<div className="mark">CN</div>
+					<div className="identityText">
+						<h1>Collaborative Notebook</h1>
+						<p title={documentDetails ? `${documentDetails.id} owned by ${documentDetails.ownerId}` : undefined}>
+							{documentDetails ? `${documentDetails.id} owned by ${documentDetails.ownerId}` : 'No document loaded'}
+						</p>
+					</div>
+				</div>
+				<div className="toolbar">
+					<label className="userPill">
+						<span aria-hidden="true">U</span>
+						<input aria-label="Display name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+					</label>
+					<button type="button" className="outlineButton" onClick={() => void createDocument()}>
+						<span aria-hidden="true">+</span>
+						<span>New</span>
+					</button>
+					<button type="button" className="outlineButton" disabled={role !== 'owner'} onClick={openShareModal}>
+						Share
+					</button>
+				</div>
+			</header>
+
+			<section className="statusbar" aria-live="polite">
+				<div className={`statusItem status ${connectionState === 'default' ? '' : connectionState}`}>
+					<span className="statusDot" aria-hidden="true" />
+					<span>{connection}</span>
+				</div>
+				<div className="statusDivider" aria-hidden="true" />
+				<div className="statusItem">
+					<span>Latency</span>
+					<code>{p95Latency === null ? 'n/a' : `${p95Latency}ms p95`}</code>
+				</div>
+				<div className="statusDivider" aria-hidden="true" />
+				<div className="statusItem">
+					<span>Revision</span>
+					<code>{revision}</code>
+				</div>
+				<div className="statusDivider" aria-hidden="true" />
+				<div className="statusItem">
+					<span>Role</span>
+					<strong>{role ?? 'none'}</strong>
+				</div>
+			</section>
+
+			<section className="workspace">
+				<aside className="panel peoplePanel">
+					<PanelHeader title="Collaborators" />
+					<div className="collaboratorArea">
+						{users.length === 0 ? (
+							<div className="emptyDashed">
+								<span aria-hidden="true">U</span>
+								<p>No one active</p>
+							</div>
+						) : (
+							<div className="avatarStack" aria-label="Active collaborators">
+								{users.map((user, index) => (
+									<div className="collaboratorAvatar" key={user.id} title={`${user.name} (${user.role}) ${user.id}`}>
+										{initials(user.name) || String(index + 1)}
+									</div>
+								))}
+							</div>
+						)}
+					</div>
+
+					<div className="panelDivider" />
+
+					<PanelHeader title="Share access" />
+					<div className="permissionForm">
+						<input aria-label="User ID" placeholder="User ID" value={grantUserId} onChange={(event) => setGrantUserId(event.target.value)} />
+						<select aria-label="Role" value={grantRole} onChange={(event) => setGrantRole(event.target.value as 'viewer' | 'editor')}>
+							<option value="viewer">Viewer</option>
+							<option value="editor">Editor</option>
+						</select>
+						<button type="button" className="outlineButton" disabled={role !== 'owner'} onClick={() => void grantPermission()}>
+							Grant
+						</button>
+					</div>
+
+					<div className="panelDivider" />
+
+					<div className="currentUser">
+						<div className="currentAvatar" aria-hidden="true">
+							{initials(displayName) || 'U'}
+						</div>
+						<div className="currentIdentity">
+							<strong>{displayName || 'Notebook User'}</strong>
+							<span>{role ?? 'not connected'}</span>
+							<code title={currentUserId}>{currentUserId || 'No user id'}</code>
+						</div>
+					</div>
+
+					{role === 'owner' && permissions.length > 0 ? (
+						<div className="accessList" aria-label="Permission grants">
+							{permissions.map((permission) => (
+								<div className="accessGrant" key={permission.user_id}>
+									<span>{permission.role}</span>
+									<code title={permission.user_id}>{permission.user_id}</code>
+								</div>
+							))}
+						</div>
+					) : null}
+				</aside>
+
+				<section className="editorColumn">
+					<div className="titleRow">
+						<input aria-label="Document title" value={title} disabled={!canEdit} onChange={(event) => setTitle(event.target.value)} />
+						<button type="button" className="saveButton" disabled={!canEdit} onClick={() => void saveTitle()}>
+							Save
+						</button>
+					</div>
+					<div ref={editorHostRef} className="editor" />
+				</section>
+
+				<aside className="panel activityPanel">
+					<PanelHeader title="Analytics" actionLabel="Refresh analytics" iconAction onAction={() => void refreshAnalytics()} />
+					<dl className="metrics">
+						<dt>Edits today</dt>
+						<dd>{analytics?.edit_count ?? 0}</dd>
+						<dt>Connections today</dt>
+						<dd>{analytics?.connection_count ?? 0}</dd>
+						<dt>Max active users</dt>
+						<dd>{analytics?.max_active_users ?? 0}</dd>
+						<dt>Bytes in</dt>
+						<dd>{analytics?.bytes_in ?? 0}</dd>
+						<dt>Bytes out</dt>
+						<dd>{analytics?.bytes_out ?? 0}</dd>
+					</dl>
+
+					<div className="panelDivider" />
+
+					<PanelHeader title="History" actionLabel="Refresh history" iconAction onAction={() => void refreshHistory()} />
+					<div className="historyList">
+						{history.length === 0 ? (
+							<p className="empty">No edits yet</p>
+						) : (
+							history.map((change) => (
+								<div className="historyItem" key={change.id}>
+									<div>
+										<strong>Revision {change.id}</strong>
+										<time dateTime={change.timestamp}>{new Date(change.timestamp).toLocaleString()}</time>
+										<code title={change.user_id}>{change.user_id}</code>
+									</div>
+									<div className="historyActions">
+										<button type="button" disabled={!canEdit} onClick={() => void revertChange(change.id, 'old')}>
+											Revert old
+										</button>
+										<button type="button" disabled={!canEdit} onClick={() => void revertChange(change.id, 'new')}>
+											Revert new
+										</button>
+									</div>
+								</div>
+							))
+						)}
+					</div>
+				</aside>
+			</section>
+
+			{toast ? <div className="toast">{toast}</div> : null}
+			{shareModalOpen ? (
+				<ShareModal
+					documentTitle={title.trim() || documentDetails?.title || 'Untitled notebook'}
+					ownerName={displayName.trim() || session?.name || 'Notebook User'}
+					ownerId={documentDetails?.ownerId ?? ''}
+					role={shareRole}
+					link={shareLink}
+					generating={shareGenerating}
+					onRoleChange={updateShareRole}
+					onCopy={() => void copyShareLink()}
+					onDone={() => setShareModalOpen(false)}
+				/>
+			) : null}
+		</main>
+	);
+}
+
+function ShareModal({
+	documentTitle,
+	ownerName,
+	ownerId,
+	role,
+	link,
+	generating,
+	onRoleChange,
+	onCopy,
+	onDone,
+}: {
+	documentTitle: string;
+	ownerName: string;
+	ownerId: string;
+	role: 'viewer' | 'editor';
+	link: string;
+	generating: boolean;
+	onRoleChange: (role: 'viewer' | 'editor') => void;
+	onCopy: () => void;
+	onDone: () => void;
+}) {
+	return (
+		<div className="modalOverlay" role="presentation">
+			<section className="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitle">
+				<header className="shareHeader">
+					<h2 id="shareTitle">Share &quot;{documentTitle}&quot;</h2>
+				</header>
+
+				<input className="sharePeopleInput" aria-label="Add people" placeholder="Add people, groups, spaces, and calendar events" disabled />
+
+				<section className="shareSection">
+					<h3>People with access</h3>
+					<div className="accessRow">
+						<div className="avatar" aria-hidden="true">
+							{initials(ownerName)}
+						</div>
+						<div className="accessIdentity">
+							<strong>{ownerName} (you)</strong>
+							<span>{ownerId}</span>
+						</div>
+						<span className="ownerLabel">Owner</span>
+					</div>
+				</section>
+
+				<section className="shareSection">
+					<h3>General access</h3>
+					<div className="generalAccessRow">
+						<div className="linkBadge" aria-hidden="true">
+							@
+						</div>
+						<div className="accessIdentity">
+							<strong>Anyone with the link</strong>
+							<span>Anyone on the internet with the link can {role === 'editor' ? 'edit' : 'view'}</span>
+						</div>
+						<select aria-label="Shared link role" value={role} onChange={(event) => onRoleChange(event.target.value as 'viewer' | 'editor')}>
+							<option value="viewer">Viewer</option>
+							<option value="editor">Editor</option>
+						</select>
+					</div>
+				</section>
+
+				<div className="shareLinkBox">
+					<input aria-label="Generated share link" value={generating ? 'Generating link...' : link} readOnly />
+				</div>
+
+				<footer className="shareFooter">
+					<button type="button" className="copyLinkButton" disabled={!link || generating} onClick={onCopy}>
+						Copy link
+					</button>
+					<button type="button" className="doneButton" onClick={onDone}>
+						Done
+					</button>
+				</footer>
+			</section>
+		</div>
+	);
+}
+
+function PanelHeader({
+	title,
+	actionLabel,
+	iconAction = false,
+	onAction,
+}: {
+	title: string;
+	actionLabel?: string;
+	iconAction?: boolean;
+	onAction?: () => void;
+}) {
+	return (
+		<div className="sectionHeader">
+			<h2>{title}</h2>
+			{actionLabel ? (
+				<button type="button" className={iconAction ? 'iconButton' : undefined} aria-label={iconAction ? actionLabel : undefined} onClick={onAction}>
+					{iconAction ? <span aria-hidden="true">↻</span> : actionLabel}
+				</button>
+			) : null}
+		</div>
+	);
+}
+
+function initials(name: string): string {
+	return name
+		.split(/\s+/)
+		.filter(Boolean)
+		.slice(0, 2)
+		.map((part) => part[0]?.toUpperCase() ?? '')
+		.join('');
+}
+
+function editabilityExtensions(canEdit: boolean) {
+	return [EditorView.editable.of(canEdit), EditorState.readOnly.of(!canEdit)];
+}
+
+function throttle(fn: () => void, ms: number): () => void {
+	let timer = 0;
+	return () => {
+		if (timer) {
+			return;
+		}
+		timer = window.setTimeout(() => {
+			timer = 0;
+			fn();
+		}, ms);
+	};
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+	let binary = '';
+	for (const byte of bytes) {
+		binary += String.fromCharCode(byte);
+	}
+	return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+	const binary = atob(value);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i += 1) {
+		bytes[i] = binary.charCodeAt(i);
+	}
+	return bytes;
+}

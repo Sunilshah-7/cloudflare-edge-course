@@ -73,6 +73,47 @@ The app starts with one Durable Object per document. This keeps one strongly con
 
 For unusually hot documents, the planned path is to add fanout Durable Object shards while keeping one coordinator Durable Object as the only writer.
 
+## Decisions Log
+
+| Area | Decision | Rationale |
+|---|---|---|
+| Conflict resolution | Hybrid strategy with Yjs CRDT for document text | Prevents concurrent text edits from overwriting each other without implementing Operational Transformation from scratch |
+| Metadata conflict handling | Last saved value for simple fields like title | Title is a scalar field, so CRDT complexity is unnecessary |
+| Presence handling | Ephemeral latest-update-wins state | Cursor and active-user state should be live but not durable document content |
+| State storage | Hybrid current snapshot plus append-only history/update logs | Fast document loads from `document_state`, with audit/revert support from `changes` and CRDT durability from `crdt_updates` |
+| Scaling | Start with one Durable Object per document | Keeps each document strongly consistent and simple; scales horizontally across documents |
+| Hot-document scaling path | Add fanout Durable Object shards later if needed | Avoids v1 complexity while preserving a credible path for unusually large documents |
+| Editor | CodeMirror 6 | Provides a richer notebook editing surface than a textarea while remaining lightweight |
+| Authentication | Signed demo sessions | Sufficient for capstone demo; production could swap in an external identity provider |
+
+## Performance Metrics
+
+The test suite includes local Worker-runtime load checks. These are not a substitute for deployed-region load testing, but they provide a repeatable baseline.
+
+Latest local run:
+
+```text
+Test: 100 edits per second on one document
+Environment: local Cloudflare Worker test runtime
+Clients: 1 editor WebSocket, 1 observer WebSocket
+Duration: approximately 1 second
+Result: 100 accepted edits, final revision 100, persisted content verified
+Ack latency: p50 4ms, p95 13ms, p99 24ms, max 29ms
+```
+
+Additional load-style coverage:
+
+- 10 concurrent WebSocket clients connected to the same document.
+- One edit broadcast verified across all 10 connected clients.
+- 100 edits/sec test verifies final observer update and persisted document state.
+
+Planned deployed-load validation:
+
+- Run the 100 edits/sec test against the deployed Worker.
+- Record p50, p95, p99 ack latency.
+- Record broadcast latency and error rate.
+- Increase connected clients from 10 to 100, then 1,000 if needed.
+
 ## Project Structure
 
 ```text

@@ -72,8 +72,8 @@ curl http://localhost:8787/?name=Alice
 
 ## Reading
 
-1. **Cloudflare**: [wrangler dev](https://developers.cloudflare.com/workers/wrangler/commands/#dev) (~5 min)
-2. **Cloudflare**: [Wrangler Tail](https://developers.cloudflare.com/workers/wrangler/commands/#tail) — stream production logs (~3 min)
+1. **Cloudflare**: [wrangler dev](https://developers.cloudflare.com/workers/wrangler/commands/workers/#dev) (~5 min)
+2. **Cloudflare**: [Wrangler Tail](https://developers.cloudflare.com/workers/wrangler/commands/workers/#tail) — stream production logs (~3 min)
 
 ## Bridge to Next Day
 

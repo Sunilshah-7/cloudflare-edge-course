@@ -50,7 +50,7 @@ Conceptual exercise: Which workload should use DO vs. KV vs. Worker-only?
 ## Reading
 
 1. **Cloudflare**: [Durable Objects Overview](https://developers.cloudflare.com/durable-objects/) (~7 min)
-2. **Cloudflare**: [When to Use Durable Objects](https://developers.cloudflare.com/durable-objects/platform/durable-objects/) (~3 min)
+2. **Cloudflare**: [When to Use Durable Objects](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/#when-to-use-durable-objects) (~3 min)
 
 ## Bridge to Week 3
 

@@ -91,7 +91,7 @@ export default {
 ## Reading
 
 1. **Cloudflare**: [Pricing Overview](https://developers.cloudflare.com/workers/platform/pricing/) (~5 min)
-2. **Cloudflare**: [Cost Optimization Guide](https://developers.cloudflare.com/workers/platform/cost-optimization/) (~7 min)
+2. **Cloudflare**: [Cost Optimization Guide](https://developers.cloudflare.com/billing/manage/optimize-costs/) (~7 min)
 
 ## Bridge to Next Day
 

@@ -79,7 +79,7 @@ export default {
 
 ## Reading
 
-1. **Cloudflare**: [Examples: Middleware](https://developers.cloudflare.com/workers/examples/middleware-chain/) (~5 min)
+1. **Cloudflare**: [Middleware](https://developers.cloudflare.com/pages/functions/middleware/) (~5 min)
 2. **Hono (Meta-Framework for Workers)**: [Middleware](https://hono.dev/docs/guides/middleware) — see how frameworks abstract this (~3 min)
 
 ## Bridge to Next Day

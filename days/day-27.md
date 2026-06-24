@@ -119,7 +119,7 @@ export default {
 
 ## Reading
 
-1. **Cloudflare**: [Analytics Engine GraphQL](https://developers.cloudflare.com/analytics/graphql-api/features/aggregations/) (~7 min)
+1. **Cloudflare**: [Analytics Engine GraphQL](https://developers.cloudflare.com/analytics/graphql-api/) (~7 min)
 2. **Observability Engineering**: [The Three Pillars](https://www.oreilly.com/library/view/observability-engineering/9781492076438/) (skim intro ~5 min)
 
 ## Bridge to Next Day

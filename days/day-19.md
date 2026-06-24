@@ -102,7 +102,7 @@ export class UserLedger {
 
 ## Reading
 
-1. **Cloudflare**: [SQL Support (Enterprise)](https://developers.cloudflare.com/durable-objects/api/sql/) (~7 min)
+1. **Cloudflare**: [SQL Support (Enterprise)](https://developers.cloudflare.com/d1/sql-api/sql-statements/) (~7 min)
 2. **SQLite**: [SQL Syntax](https://www.sqlite.org/lang.html) (reference, skim ~5 min)
 
 ## Bridge to Next Day

@@ -71,7 +71,7 @@ Rebalance or add shards if imbalance is severe.
 
 ## Reading
 
-1. **Cloudflare**: [Durable Objects Scaling Patterns](https://developers.cloudflare.com/durable-objects/best-practices/durable-objects/) (~7 min)
+1. **Cloudflare**: [Durable Objects Scaling Patterns](https://developers.cloudflare.com/reference-architecture/diagrams/storage/durable-object-control-data-plane-pattern/) (~7 min)
 2. **Consistent Hashing**: [Hash Ring](https://en.wikipedia.org/wiki/Consistent_hashing) (skim ~5 min)
 
 ## Bridge to Next Day

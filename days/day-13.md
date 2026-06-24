@@ -91,7 +91,7 @@ export default {
 
 ## Reading
 
-1. **Cloudflare**: [Error Tracking & Debugging](https://developers.cloudflare.com/workers/platform/error-handling/) (~5 min)
+1. **Cloudflare**: [Errors and exceptions](https://developers.cloudflare.com/workers/observability/errors/) (~5 min)
 2. **Martin Fowler**: [Circuit Breaker Pattern](https://martinfowler.com/bliki/CircuitBreaker.html) (~10 min, skim)
 
 ## Bridge to Next Day
